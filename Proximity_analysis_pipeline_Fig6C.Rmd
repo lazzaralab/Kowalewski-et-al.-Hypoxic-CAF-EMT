@@ -1,0 +1,531 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#install.packages("RANN")
+library(RANN)
+```
+```{r} 
+#Load in data
+library(readxl)
+df <- read_excel("C:/Users/karlm/Documents/Python Scripts/2023-01-25_Squidpy analysis KPCY tumors/Compiled all.xlsx")
+
+```
+```{r}
+#install.packages('geosphere')
+#help(package = 'geosphere')
+#library(geosphere)
+```
+```{r}
+library(fields)
+NormVimposCC<-df[df$CellType=="Vim+ Normoxic Cancer Cell",]
+NormsCC<-df[df$CellType==c("Vim+ Normoxic Cancer Cell","Vim- Normoxic Cancer Cell"),]
+CancerCells <-df[df$CellType==c("Vim+ Normoxic Cancer Cell","Vim- Normoxic Cancer Cell","Vim+ Hypoxic Cancer Cell","Vim- Hypoxic Cancer Cell"),]
+HypoxicCCs <- df[df$CellType==c("Vim+ Hypoxic Cancer Cell","Vim- Hypoxic Cancer Cell"),]
+VimHypCC <- df[df$CellType==c("Vim+ Hypoxic Cancer Cell"),]
+
+HypCAF <- df[df$CellType=="Hypoxic CAF",]
+NormCAF <- df[df$CellType=="Normoxic CAF",]
+CAF_comb <- rbind(HypCAF,NormCAF)
+
+Vimpos_norm_CC = as.matrix(NormVimposCC[,2:3])
+HypCAF_coord = as.matrix(HypCAF[,2:3])
+NormCAF_coord = as.matrix(NormCAF[,2:3])
+CancerCells_mat = as.matrix(CancerCells[,2:3]) 
+HypCC_mat = as.matrix(HypoxicCCs[,2:3]) 
+All_cells = as.matrix(df[,2:3])
+VimHypCC_mat = as.matrix(VimHypCC[,2:3])
+AllCAF = as.matrix(CAF_comb[,2:3])
+
+#Example to verify order of distance matrix - starts with first point of the first matrix
+#test_coord <- matrix(c(444.16250,7009.050,215.22764, 7009.724,12,13), nrow = 3, ncol = 2, byrow = TRUE,
+#               dimnames = list(c("row1", "row2", "row3"),
+#                               c("C.1", "C.2"))) 
+validation <- rdist(CancerCells_mat,CancerCells_mat)
+
+distances_HypCAF_NormCC <- rdist(Vimpos_norm_CC,HypCAF_coord)
+distances_NormCAF_NormCC <- rdist(Vimpos_norm_CC,NormCAF_coord)
+HypCC_HypCAFs <- rdist(HypCC_mat,HypCAF_coord)
+HypCC_All <- rdist(HypCC_mat,All_cells)
+HypCC_AllCAF <- rdist(HypCC_mat,AllCAF)
+
+#Use this format to identify cells with near hypoxic CAFs and normoxic CAFs
+#Probably want to start with a general analysis of all cancer cells close to normoxic and hypoxic CAFs
+num_interact <- rowSums(distances_HypCAF_NormCC< 357)
+num_interact2 <- rowSums(distances_NormCAF_NormCC< 357)
+num_interact3 <- rowSums(HypCC_HypCAFs< 357)
+num_interact4 <- rowSums(HypCC_All< 357) -1 #minus 1 to account for same cell included in both coordinates
+num_interact5 <- rowSums(HypCC_AllCAF < 357)
+#Will need to subtract 1 from all cell interaction to account for same cell interactions
+
+#Will need to subtract 1 from all cell interaction to account for same cell interactions
+sum1 <- sum(num_interact)
+sum2 <- sum(num_interact2)
+sum3 <- sum(num_interact3)
+sum4 <- sum(num_interact4)
+sum5 <- sum(num_interact5)
+
+HypoxicCCs$Num_Hyp_CAFs <- num_interact3
+HypoxicCCs$Num_All <- num_interact4
+HypoxicCCs$Num_AllCAF <- num_interact5
+HypoxicCCs$Fraction <- HypoxicCCs$Num_Hyp_CAFs / HypoxicCCs$Num_AllCAF
+
+#Using any cells that are within the neighborhood of greater than or less than 50% hypoxic CAFs
+
+NearHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction > 0.5,]
+NearVimPos <- nrow(NearHypCAFs[NearHypCAFs$CellType == "Vim+ Hypoxic Cancer Cell",])/nrow(NearHypCAFs)
+
+FarHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction <= 0.5,]
+FarVimPos <- nrow(FarHypCAFs[FarHypCAFs$CellType == "Vim+ Hypoxic Cancer Cell",])/nrow(FarHypCAFs)
+
+Combined_fractions <- as.data.frame(t(cbind(FarVimPos, NearVimPos)))
+Combined_fractions$Class <- rownames(Combined_fractions)
+Combined_fractions$V1 <- as.numeric(Combined_fractions$V1)
+Combined_fractions$Class <- as.character(Combined_fractions$Class)
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+
+df2 <- data.frame(dose=c('Far\n(>50um)', 'Near\n(<50um)'),
+                len=c(FarVimPos, NearVimPos))
+
+
+E <- ggplot(data = df2, aes(x = dose, y=len))+#, shape="Condition"))+
+  geom_bar(stat="identity", color=c("black"), fill= c("#00A1D5","#DF8F44"),
+          position = position_dodge(),size=1.25, width = .75) +
+  scale_y_continuous(limits=c(0,0.4),expand=c(0,0))+
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("Fraction Vimentin +") +
+  xlab("") +
+  ggtitle("HYP+ Cancer Cells")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))#+
+E
+
+x <- df$`X position`
+y <- df$`Y position`
+
+plot(y, x, main = "Main title",
+     xlab = "X axis title", ylab = "Y axis title",
+     pch = 19, frame = FALSE, cex=0.1)
+```
+```{r}
+ROI1 <- filter(df, `Y position` > 6000) 
+ROI2 <- filter(df, `X position` > 6000) 
+ROI3 <- filter(df, `X position` < 6000 & `Y position` < 6000) 
+
+ROI1$Region <- "1"
+ROI2$Region <- "2"
+ROI3$Region <- "3"
+dfcomb <- rbind(ROI1, ROI2, ROI3)
+```
+#ROI1
+```{r}
+df <- filter(dfcomb, Region == "1")
+
+NormVimposCC<-df[df$CellType=="Vim+ Normoxic Cancer Cell",]
+NormsCC<-df[df$CellType==c("Vim+ Normoxic Cancer Cell","Vim- Normoxic Cancer Cell"),]
+CancerCells <-df[df$CellType==c("Vim+ Normoxic Cancer Cell","Vim- Normoxic Cancer Cell","Vim+ Hypoxic Cancer Cell","Vim- Hypoxic Cancer Cell"),]
+HypoxicCCs <- df[df$CellType==c("Vim+ Hypoxic Cancer Cell","Vim- Hypoxic Cancer Cell"),]
+VimHypCC <- df[df$CellType==c("Vim+ Hypoxic Cancer Cell"),]
+
+HypCAF <- df[df$CellType=="Hypoxic CAF",]
+NormCAF <- df[df$CellType=="Normoxic CAF",]
+CAF_comb <- rbind(HypCAF,NormCAF)
+
+Vimpos_norm_CC = as.matrix(NormVimposCC[,2:3])
+HypCAF_coord = as.matrix(HypCAF[,2:3])
+NormCAF_coord = as.matrix(NormCAF[,2:3])
+CancerCells_mat = as.matrix(CancerCells[,2:3]) 
+HypCC_mat = as.matrix(HypoxicCCs[,2:3]) 
+All_cells = as.matrix(df[,2:3])
+VimHypCC_mat = as.matrix(VimHypCC[,2:3])
+AllCAF = as.matrix(CAF_comb[,2:3])
+
+
+#Example to verify order of distance matrix - starts with first point of the first matrix
+#test_coord <- matrix(c(444.16250,7009.050,215.22764, 7009.724,12,13), nrow = 3, ncol = 2, byrow = TRUE,
+#               dimnames = list(c("row1", "row2", "row3"),
+#                               c("C.1", "C.2"))) 
+validation <- rdist(CancerCells_mat,CancerCells_mat)
+
+distances_HypCAF_NormCC <- rdist(Vimpos_norm_CC,HypCAF_coord)
+distances_NormCAF_NormCC <- rdist(Vimpos_norm_CC,NormCAF_coord)
+HypCC_HypCAFs <- rdist(HypCC_mat,HypCAF_coord)
+HypCC_All <- rdist(HypCC_mat,All_cells)
+HypCC_normCAF <- rdist(HypCC_mat,NormCAF_coord)
+HypCC_AllCAF <- rdist(HypCC_mat,AllCAF)
+
+#Use this format to identify cells with near hypoxic CAFs and normoxic CAFs
+#Probably want to start with a general analysis of all cancer cells close to normoxic and hypoxic CAFs
+num_interact <- rowSums(distances_HypCAF_NormCC < 357)
+num_interact2 <- rowSums(distances_NormCAF_NormCC < 357)
+num_interact3 <- rowSums(HypCC_HypCAFs < 357)
+num_interact4 <- rowSums(HypCC_All < 357) -1 #minus 1 to account for same cell included in both coordinates
+num_interact5 <- rowSums(HypCC_normCAF < 357)
+#Will need to subtract 1 from all cell interaction to account for same cell interactions
+sum1 <- sum(num_interact)
+sum2 <- sum(num_interact2)
+sum3 <- sum(num_interact3)
+sum4 <- sum(num_interact4)
+sum5 <- sum(num_interact5)
+
+HypoxicCCs$Num_Hyp_CAFs <- num_interact3
+HypoxicCCs$Num_All <- num_interact4
+HypoxicCCs$Num_AllCAF <- num_interact5
+HypoxicCCs$Fraction <- HypoxicCCs$Num_Hyp_CAFs / HypoxicCCs$Num_AllCAF
+
+#Using any cells that are within the neighborhood of greater than or less than 50% hypoxic CAFs
+NearHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction > 0.5,]
+NearVimPos <- nrow(NearHypCAFs[NearHypCAFs$CellType == "Vim+ Hypoxic Cancer Cell",])/nrow(NearHypCAFs)
+
+FarHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction <= 0.5,]
+FarVimPos <- nrow(FarHypCAFs[FarHypCAFs$CellType == "Vim+ Hypoxic Cancer Cell",])/nrow(FarHypCAFs)
+
+Combined_fractions <- as.data.frame(t(cbind(FarVimPos, NearVimPos)))
+Combined_fractions$Class <- rownames(Combined_fractions)
+Combined_fractions$V1 <- as.numeric(Combined_fractions$V1)
+Combined_fractions$Class <- as.character(Combined_fractions$Class)
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+
+df2 <- data.frame(dose=c('Far\n(>50um)', 'Near\n(<50um)'),
+                len=c(FarVimPos, NearVimPos))
+```
+```{r}
+library(ggsci)
+CP <- as.data.frame(tibble::tribble(
+  ~dose, ~len,
+  "Far (>50um)", .068,
+  "Far (>50um)", .108,
+  "Far (>50um)", .0556,
+  "Near (<50um)", .1011,
+  "Near (<50um)", .168,
+  "Near (<50um)", .162,
+  ))
+
+t.test(x=c(0.068, 0.108, 0.0556), y = c(.1011,.168,.162))
+  
+E <- ggplot(data = CP, aes(x = dose, y=len, fill=dose, color = dose))+#, shape="Condition"))+
+  stat_summary(aes(y = `len`), fun = "mean", geom = "bar", width = 0.7, size = 1.5,color = "black")+
+  stat_summary(fun.data="mean_se", geom="errorbar",  size=2, width=0)+
+  #geom_dotplot(binaxis='y', stackdir='center', dotsize=1.2)+
+  geom_point(size = 5, stroke = 1,position=position_jitterdodge(dodge.width=.5))+
+  scale_color_manual(values=c("#00A1D5","#DF8F44"))+
+  scale_fill_manual(values=c("white","white"))+
+  #scale_color_jama()+
+  scale_y_continuous(limits=c(0,0.4),expand=c(0,0))+
+  theme_classic(base_size = 24)+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme(legend.position = "none") +
+  ylab("Fraction Vimentin +") +
+  xlab("") +
+  #theme_prism(base_size = 15) + 
+  #ggtitle("HYP+ Cancer Cells")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))#+
+  #geom_signif(comparisons=list(c("Untreated", "21% O2 0082T CM"),c("Untreated","1% O2 0082T CM")), annotations="*",
+  #            y_position = c(.17,.16), tip_length = .1, vjust=0.4, size=1., textsize=10)
+E
+```
+
+```{r}
+library(pheatmap)
+library(fields)
+#Need to have distances from Vim+ Hyp CC to each other cell type and then combine into one DF
+NormvimNCC<-df[df$CellType==c("Vim- Normoxic Cancer Cell"),]
+VimN_norm_CC = as.matrix(NormvimNCC[,2:3])
+
+VimNegHypCC <- df[df$CellType==c("Vim- Hypoxic Cancer Cell"),]
+VimNegHyp_CC = as.matrix(VimNegHypCC[,2:3])
+
+#VimP_CC <- df[df$CellType==c("Vim- Hypoxic Cancer Cell","Vim+ Hypoxic Cancer Cell"),]
+#VimP_CC_mat <- as.matrix(VimP_CC[,2:3])
+
+HypCAF_df <- df[df$CellType==c("Hypoxic CAF"),]
+HypCAF_mat <- as.matrix(HypCAF_df)
+
+NormCAF_df <- df[df$CellType==c("Normoxic CAF"),]
+NormCAF_mat <- as.matrix(NormCAF_df)
+
+VimP_hyp_CC <- df[df$CellType==c("Vim+ Hypoxic Cancer Cell"),]
+VimP_Hyp_CC_mat <- as.matrix(VimP_hyp_CC[,2:3])
+
+VimN_Norm_CC_df <- df[df$CellType==c("Vim- Normoxic Cancer Cell"),]
+VimN_Norm_CC_mat <- as.matrix(VimN_Norm_CC_df[,2:3])
+
+to_all <- rdist(VimP_Hyp_CC_mat,All_cells)
+to_all_sum <- rowSums(to_all< 20)
+
+to_hypCAF <-rdist(VimP_Hyp_CC_mat,HypCAF_mat)
+to_hypCAF_sum <- rowSums(to_hypCAF< 20)
+
+to_normCAF <-rdist(VimP_Hyp_CC_mat,NormCAF_mat)
+to_normCAF_sum <- rowSums(to_normCAF< 20)
+
+to_vimpnormcc <- rdist(VimP_Hyp_CC_mat,Vimpos_norm_CC)
+to_vimpnormcc_sum <- rowSums(to_vimpnormcc< 20)
+
+to_vimNnormcc <- rdist(VimP_Hyp_CC_mat,VimN_Norm_CC_mat)
+to_vimNnormcc_sum <- rowSums(to_vimNnormcc< 20)
+
+to_vimNhypCC <- rdist(VimP_Hyp_CC_mat,VimNegHypCC)
+to_vimNhypCC_sum <- rowSums(to_vimNhypCC< 20)
+
+#Vim positive 
+#mindist_VimP_Hyp_CC <- apply(Alldist_VimPos_Hyp_CC, 1, FUN = rowSums(distances_NormCAF_NormCC< 100))
+
+#mindist_to_hypCAF <- apply(to_hypCAF, 1, FUN = min)
+#mindist_to_normCAF <- apply(to_normCAF, 1, FUN = min)
+#mindist_to_vimpnormcc <- apply(to_vimpnormcc, 1, FUN = min)
+#mindist_to_vimNnormcc <- apply(to_vimNnormcc, 1, FUN = min)
+#mindist_to_vimNhypCC <- apply(to_vimNhypCC, 1, FUN = min)
+
+frac_to_hypCAF <- to_hypCAF_sum/to_all_sum
+frac_to_normCAF <- to_normCAF_sum/to_all_sum
+frac_to_vimpnormcc <- to_vimpnormcc_sum/to_all_sum
+frac_to_vimNnormcc <- to_vimNnormcc_sum/to_all_sum
+frac_to_vimNhypCC <- to_vimNhypCC_sum/to_all_sum
+
+Allcells_100 <- rowSums(to_all)
+
+update_df <- cbind(VimP_hyp_CC, frac_to_hypCAF,frac_to_normCAF,frac_to_vimpnormcc,frac_to_vimNnormcc,frac_to_vimNhypCC)
+
+filtered_spatial_mat <- as.matrix(update_df[,5:9])
+#select_cell_types <- filter(update_df, CellType==c("Vim- Normoxic Cancer Cell","Vim+ Normoxic Cancer Cell","Hypoxic CAF","Vim- Hypoxic Cancer Cell","Normoxic CAF"))
+#select_cell_types <- cbind(select_cell_types,rownames(select_cell_types))
+#pheatmap(filtered_spatial_mat, cluster_rows = TRUE, cluster_cols  = FALSE,color = colorRampPalette(c("navy","lightblue", "white", "yellow"))(100))
+```
+```{r}
+library(dplyr)
+library(geomtextpath)
+
+df <- read_excel("G:/2023-11-11-4i-KPCY2_6/CellProfiler/2023-11-11-4i-KPCY_2_6_ImageAnalysis.xlsx")
+#as.character(df$ImageNumber)
+df$ImageNumber <- as.character(df$ImageNumber)
+
+#f_f1 <- filter(df, ImageNumber != "1")
+df_filt <- filter(df, ImageNumber != "7")
+
+YFP <- ggplot(df_filt, aes(x=CC_MeanIntensity_YFP))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  #geom_textdensity(aes(label = ImageNumber), 
+  #                 hjust = "ymax", 
+  #                 vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .14, color="red")+
+  theme_prism()
+YFP
+#.14 cutoff
+
+PDPN <- ggplot(df_filt, aes(x=CAF_MeanIntensity_PDPN))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  #geom_textdensity(aes(label = ImageNumber), 
+  #                 hjust = "ymax", 
+  #                 vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .13, color="red")+
+  theme_prism()
+PDPN
+#.13 cutoff
+
+df_filt$ImageNumber <- as.character(df_filt$ImageNumber)
+
+HYP_CC <- ggplot(df_filt, aes(x=CC_MeanIntensity_HYP, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  #geom_textdensity(aes(label = ImageNumber), 
+  #                 hjust = "ymax", 
+  #                 vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .2, color="red")+
+  theme_prism()
+HYP_CC
+#.2 cutoff
+
+HYP_CAF <- ggplot(df_filt, aes(x=CAF_MeanIntensity_HYP))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  #geom_textdensity(aes(label = ImageNumber), 
+  #                 hjust = "ymax", 
+  #                 vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .2, color="red")+
+  theme_prism()
+HYP_CAF
+#.2 cutoff
+Cancer$ImageNumber <- as.character(Cancer$ImageNumber)
+
+VIM <- ggplot(Cancer, aes(x=CC_MeanIntensity_Vimentin, fill = ImageNumber))+
+  geom_density(alpha = 0.1)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = `ImageNumber`), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .15, color="red")+
+  theme_prism()
+VIM
+#.15 cutoff
+Cancer <- filter(df_filt, CC_MeanIntensity_YFP >= .14 & CC_MeanIntensity_PDPN < .13)
+
+NormvimNCC <- filter(df_filt, CC_MeanIntensity_YFP >= .14 & CC_MeanIntensity_PDPN < .13 & CC_MeanIntensity_Vimentin < .15 & CC_MeanIntensity_HYP < .22)
+
+NormvimPCC <- filter(df_filt, CC_MeanIntensity_YFP >= .14 & CC_MeanIntensity_PDPN < .13 & CC_MeanIntensity_Vimentin >= .15 & CC_MeanIntensity_HYP < .22)
+
+HypvimNCC <- filter(df_filt, CC_MeanIntensity_YFP >= .14 & CC_MeanIntensity_PDPN < .13 & CC_MeanIntensity_Vimentin < .15 & CC_MeanIntensity_HYP >= .22)
+
+HypvimPCC <- filter(df_filt, CC_MeanIntensity_YFP >= .14 & CC_MeanIntensity_PDPN < .13 & CC_MeanIntensity_Vimentin >= .15 & CC_MeanIntensity_HYP >= .22)
+
+NormCAF <- filter(df_filt, CAF_MeanIntensity_YFP < .14 & CAF_MeanIntensity_PDPN >= .13 & CAF_MeanIntensity_HYP < .22)
+
+HypCAF <- filter(df_filt, CAF_MeanIntensity_YFP < .14 & CAF_MeanIntensity_PDPN >= .13 & CAF_MeanIntensity_HYP >= .22)
+
+NormvimNCC$Cell <- "Normoxic Vim- CC"
+NormvimPCC$Cell <- "Normoxic Vim+ CC"
+HypvimNCC$Cell <- "Hypoxic Vim- CC"
+HypvimPCC$Cell <- "Hypoxic Vim+ CC"
+
+NormCAF$Cell <- "Normoxic CAF"
+HypCAF$Cell <- "Hypoxic CAF"
+
+```
+
+```{r}
+library(ggprism)
+library(ggsci)
+library(ggsignif)
+
+comb <- rbind(NormvimNCC,NormvimPCC,HypvimNCC,HypvimPCC,NormCAF,HypCAF)
+
+hypoxiconly <- rbind(HypvimNCC,HypvimPCC,HypCAF)
+  
+img1 <- filter(comb, ImageNumber == "1")
+
+img1$Location_Center_Y <- -img1$Location_Center_Y
+
+Map <- ggplot(img1, aes(x=Location_Center_X, y=Location_Center_Y, color=Cell)) +
+  geom_point()+
+  theme_prism(base_fontface = "plain")+
+  scale_color_jama()
+Map
+```
+```{r}
+library(fields)
+df <- filter(comb, ImageNumber == "6")
+
+NormVimposCC<-df[df$Cell=="Normoxic Vim+ CC",]
+NormsCC<-df[df$Cell==c("Normoxic Vim+ CC","Normoxic Vim- CC"),]
+CancerCells <-df[df$Cell==c("Normoxic Vim+ CC","Normoxic Vim- CC","Hypoxic Vim+ CC","Hypoxic Vim- CC"),]
+HypoxicCCs <- df[df$Cell==c("Hypoxic Vim+ CC","Hypoxic Vim- CC"),]
+VimHypCC <- df[df$Cell==c("Hypoxic Vim+ CC"),]
+
+HypCAF <- df[df$Cell=="Hypoxic CAF",]
+NormCAF <- df[df$Cell=="Normoxic CAF",]
+CAF_comb <- rbind(HypCAF,NormCAF)
+
+# Some fake latitude/longitude data. Make sure longitude is column 1 and latitude column 2
+Vimpos_norm_CC = as.matrix(NormVimposCC[,15:16])
+HypCAF_coord = as.matrix(HypCAF[,15:16])
+NormCAF_coord = as.matrix(NormCAF[,15:16])
+CancerCells_mat = as.matrix(CancerCells[,15:16]) 
+HypCC_mat = as.matrix(HypoxicCCs[,15:16]) 
+All_cells = as.matrix(df[,15:16])
+VimHypCC_mat = as.matrix(VimHypCC[,15:16])
+AllCAF = as.matrix(CAF_comb[,2:3])
+
+
+#Example to verify order of distance matrix - starts with first point of the first matrix
+#test_coord <- matrix(c(444.16250,7009.050,215.22764, 7009.724,12,13), nrow = 3, ncol = 2, byrow = TRUE,
+#               dimnames = list(c("row1", "row2", "row3"),
+#                               c("C.1", "C.2"))) 
+validation <- rdist(CancerCells_mat,CancerCells_mat)
+
+distances_HypCAF_NormCC <- rdist(Vimpos_norm_CC,HypCAF_coord)
+distances_NormCAF_NormCC <- rdist(Vimpos_norm_CC,NormCAF_coord)
+HypCC_HypCAFs <- rdist(HypCC_mat,HypCAF_coord)
+HypCC_All <- rdist(HypCC_mat,All_cells)
+HypCC_AllCAF <- rdist(HypCC_mat,AllCAF)
+
+
+#Use this format to identify cells with near hypoxic CAFs and normoxic CAFs
+#Probably want to start with a general analysis of all cancer cells close to normoxic and hypoxic CAFs
+num_interact <- rowSums(distances_HypCAF_NormCC < 71.7)
+num_interact2 <- rowSums(distances_NormCAF_NormCC < 71.7)
+num_interact3 <- rowSums(HypCC_HypCAFs < 71.7)
+num_interact4 <- rowSums(HypCC_All < 71.7) -1 #minus 1 to account for same cell included in both coordinates
+num_interact5 <- rowSums(HypCC_AllCAF < 71.7)
+
+#Will need to subtract 1 from all cell interaction to account for same cell interactions
+sum1 <- sum(num_interact)
+sum2 <- sum(num_interact2)
+sum3 <- sum(num_interact3)
+sum4 <- sum(num_interact4)
+sum5 <- sum(num_interact5)
+
+
+HypoxicCCs$Num_Hyp_CAFs <- num_interact3
+HypoxicCCs$Num_All <- num_interact4
+HypoxicCCs$Num_AllCAF <- num_interact5
+HypoxicCCs$Fraction <- HypoxicCCs$Num_Hyp_CAFs / HypoxicCCs$Num_AllCAF
+
+#Using any cells that are within the neighborhood of greater than or less than 20% hypoxic CAFs
+NearHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction > 0.5,]
+NearVimPos <- nrow(NearHypCAFs[NearHypCAFs$Cell == "Hypoxic Vim+ CC",])/nrow(NearHypCAFs)
+
+FarHypCAFs <- HypoxicCCs[HypoxicCCs$Fraction <= 0.5,]
+FarVimPos <- nrow(FarHypCAFs[FarHypCAFs$Cell == "Hypoxic Vim+ CC",])/nrow(FarHypCAFs)
+
+NormCC_vim <- nrow(NormVimposCC)/nrow(NormsCC)
+HypCC_vim <- nrow(VimHypCC)/nrow(HypoxicCCs)
+
+#2 Near = .13, far = .055;fold increase = 2.36
+#3 Near = .321, far = 0.27; fold increase = 1.19
+#6 Near = .222, far = .0797; fold increase = 2.785
+
+t.test(x=c(1, 1, 1), y = c(1.48,1.555,2.111))
+
+CP <- as.data.frame(tibble::tribble(
+  ~dose, ~len,
+  "Far (>50um)", 1,
+  "Far (>50um)", 1,
+  "Far (>50um)", 1,
+  "Near (<50um)", 1.48,
+  "Near (<50um)", 1.555,
+  "Near (<50um)", 2.111,
+  ))
+
+E <- ggplot(data = CP, aes(x = dose, y=len, fill=dose, color = dose))+#, shape="Condition"))+
+  stat_summary(aes(y = `len`), fun = "mean", geom="crossbar",width = .65,color = "black")+
+  #stat_summary(fun.data="mean_se", geom="errorbar",  size=2, width=0)+
+  #geom_dotplot(binaxis='y', stackdir='center', dotsize=1.2)+
+  #geom_boxplot()+
+  geom_point(size = 5, stroke = 1,position=position_jitterdodge(dodge.width=.65))+
+  scale_color_manual(values=c("#00A1D5","#DF8F44"))+
+  scale_fill_manual(values=c("white","white"))+
+  #scale_color_jama()+
+  scale_y_continuous(limits=c(0,3),expand=c(0,0))+
+  guides(y = "prism_offset_minor") + 
+  theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme(legend.position = "none") +
+  ylab("Fold Change in \nPercent Vimentin +") +
+  xlab("") +
+  #theme_prism(base_size = 15) + 
+  #ggtitle("HYP+ Cancer Cells")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))+
+  geom_signif(comparisons=list(c("Far (>50um)", "Near (<50um)")), annotations="p = 0.0694", y_position = c(2.3), tip_length = c(1,.1), vjust=0.4, size=1., textsize=10, color="black")
+E
+```
+
+
+

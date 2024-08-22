@@ -1,0 +1,986 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+##Loading packages
+```{r Load packages, message=F, warning=F}
+library(tidyverse)
+library(magrittr)
+library(ggsci)
+library(paletteer)
+library(cowplot)
+library(parallel)
+library(RColorBrewer)
+library(ggrepel)
+library(pheatmap)
+library(GEOquery)
+library(limma)
+library(umap)
+```
+```{r}
+### Clear R workspace:
+rm(list=ls())
+```
+```{r}
+### Check current working directory:
+cwd <- getwd()
+cwd
+```
+```{r}
+## Define 'not in' (ni) operator
+`%ni%` <- Negate(`%in%`)
+```
+
+```{r}
+## Ensembl ID-to-gene symbol annotations:
+fn.genes <- "genes.tsv"
+genes <- read_tsv(fn.genes, col_names = F)
+```
+```{r}
+colnames(genes) <- c("ensemblID","gene_symbol")
+
+
+## Load Entrez gene IDs that match ENSEMBL IDs:
+fn.entrez <- "entrezIDs.csv"
+file.exists(fn.entrez)
+```
+```{r}
+###Import clusters from Elyada paper
+fn.tsne <- "fibroblast_tsne2.csv"
+orig_tsne <- read.csv(fn.tsne)
+```
+
+```{r}
+if(file.exists(fn.entrez)){
+  entrezIDs <- read.csv(fn.entrez)
+} 
+
+## Use biomaRt to get ENTREZ gene IDs if the file doesn't exist:
+if(!exists("entrezIDs")){
+  library(biomaRt)
+  mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+  entrezIDs <- getBM(
+    filters="ensembl_gene_id",
+    attributes=c("ensembl_gene_id", "entrezgene_id"),
+    values=genes$ensemblID,
+    mart=mart)
+  entrezIDs$entrezgene_id[entrezIDs$ensembl_gene_id=="ENSG00000227953"] <- 149134 # ENTREZ ID for LOC149134 gene
+  write.csv(entrezIDs,"entrezIDs.csv",row.names = F)
+}
+```
+
+```{r}
+## First, decide whether we want data with low-variance genes filtered out (by the original authors) or the full set of expression data:
+which_data_to_use <- "filtered" # use "full" to indicate the full set of genes; otherwise, will use the pre-filtered data set for ductal cell
+
+## File names/paths:
+fn.fibroexp <- "fibroblast_expression.csv" # file with filtered ductal cell gene expression
+
+fn.exp <- "human_combined_expression.csv" # file with all gene expression for all cells
+
+fn.fibroexp.all <- "human_fibroblast_expression_all.csv"
+
+#fn.fibroexp <- read.csv("C:/Users/karlm/Documents/R/scRNAseq NicheNet/ductal_expression.csv")
+#fn.exp <- "human_combined_expression.csv" # file with all gene expression for all cells
+#fn.fibroexp.all <- read.csv("C:/Users/karlm/Documents/R/scRNAseq NicheNet/ductal_expression.csv")
+
+if(which_data_to_use == "full"){
+  if(file.exists(fn.ductexp.all)){ # if expression of all genes in ductal cells has been extracted, load the file
+        all.exp <- read_csv(fn.fibroexp.all, col_names = T) %>%
+        # all.exp <- read_csv(fn.ductexp, col_names=T) %>% 
+          # dplyr::rename(geneID = X1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+
+      } else { # otherwise, get the data for all genes in ductal cells
+        ductal_names <- read_csv(fn.fibroexp, col_names=F, n_max=1)[,-1] %>%
+        t() # barcodes for ductal cells
+        all.exp <- read_csv(fn.exp, col_names=T)[,c("X1", ductal_names)] %>% # get expression data for all genes in ductal cells
+          dplyr::rename(geneID = ...1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+        write.csv(all.exp, file="human_fibro_expression_all.csv", row.names = F,
+                  col.names = T)
+      }
+  
+  } else {
+  all.exp <- read_csv(fn.fibroexp, col_names=T) %>% 
+    dplyr::rename(geneID = ...1) %>% 
+    data.frame()
+  all.spls <- colnames(all.exp)[-1] %>% 
+    data.frame(ID=.)
+}
+```
+```{r}
+## Get barcodes for adjacent normal sample cells:
+normal_cells <- all.exp %>% 
+  colnames() %>% 
+  str_detect("7|9") %>% 
+  colnames(all.exp)[.]
+
+## Get expression data for tumor cells only:
+exp <- all.exp %>%
+  dplyr::select(-all_of(normal_cells)) %>% # remove cells from adjacent normal tissue
+  dplyr::select(-contains("6")) # remove cells from sample hT143 (not a PDAC sample)
+rownames(exp) <- exp$geneID
+```
+```{r}
+## Expression data with Entrez gene IDs:
+exp.entrez <- exp %>% 
+  mutate(geneID = geneID %>% match(entrezIDs$ensembl_gene_id) %>% entrezIDs$entrezgene_id[.])
+
+## Expression data with gene symbols:
+exp.symbol <- exp %>% 
+  mutate(geneID = geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+## Sample annotation data:
+spls <- colnames(exp)[-1] %>% 
+  data.frame(ID=.)
+
+## Filter out zero-variance genes:
+zeroVar <- which((exp[,-1] %>% apply(MARGIN=1, FUN=var, na.rm=TRUE)) == 0)
+zeroVarGenes <- exp[zeroVar,] # genes with zero variance
+ exp.filt <- exp[-zeroVar, ] # expression data without zero-variance genes
+ exp <- exp[-zeroVar, ] # expression data without zero-variance genes
+```
+
+```{r}
+hif.sig <- c("IGFBP3", "EDN2", "PFKFB4", "FLT1", "TFR2", "BNIP3L", "TGFA",
+             "BNIP3","PGK1","EGLN1","LDHA","EGLN3","CP","TGFB3","PFKFB3",
+             "HK1","TFRC","EDN1","CDKN1A","CA9","ADM","HMOX1","SERPINE1",
+             "LOX","NDRG1","CA12","PDK1","VEGFA","ERO1L","RORA","P4HA1","MXI1",
+             "SLC2A1","STC2","MIF","DDIT4","ENO1","CXCR4","PLOD1","P4HA2","GAPDH","PGAM1","TMEM45A","PIM1") %>% 
+  match(genes$gene_symbol) %>% genes$ensemblID[.]
+
+## HIF signature gene expression:
+hif <- match(hif.sig, exp$geneID) %>% na.omit() %>% exp[.,] %>% data.frame()
+rownames(hif) <- hif$geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.]
+hif_scores <- hif[,-1] %>% colMeans() %>% data.frame(hif_score=., ID=colnames(hif)[-1])
+
+## Annotate the samples with their HIF scores:
+spls <- spls %>%
+  mutate(hif.score = hif_scores$hif_score)
+
+median(hif_scores$hif_score)
+```
+```{r}
+#want hypoxis score using hallmark_hypoxia from GSEA
+hall_hypoxia <- read.delim("hallmark_hypoxia.txt")
+hyp_genes <- hall_hypoxia$geneID
+
+hall_hyp_exp <- match(hyp_genes, exp.symbol$geneID) %>% na.omit() %>% exp.symbol[.,] %>% data.frame()
+
+HM_hyp <- hall_hyp_exp
+rownames(HM_hyp) <- hall_hyp_exp$geneID
+
+HM_hyp_scores <- HM_hyp[,-1] %>% colMeans() %>% data.frame(hif_score=., ID=colnames(hif)[-1])
+
+HM_hyp_scores.mat <- t(HM_hyp[,-1])
+```
+#Hallmark_hyp overlap with CosMx panel
+```{r}
+library(readxl)
+cosmx <- read_xlsx("Z:/KMK/R files/scRNA_seq_Fibroblast_only_fraction_2021_01_29/LBL-11176-03-Mouse-Universal-Cell-Characterization-Gene-List.xlsx", sheet = "Gene and Probe Details")
+
+colnames(cosmx)<-cosmx[1,]
+cosmx <- cosmx[-1,]
+
+cosmx_genes_human <- cosmx$`Human Gene`
+
+overlapping_genes <- intersect(cosmx_genes_human, hyp_genes)
+```
+
+```{r}
+## Load pan-cancer EMT signature:
+pcemt.fn <- "CAF_sub_signature.txt"
+pcemt.sig <- read_tsv(pcemt.fn, col_names = c("gene","type"))
+pcemt.sig.m <- read_tsv(pcemt.fn, col_names = c("gene","type")) %>% subset(type %in% "M")
+pcemt.sig.i <- read_tsv(pcemt.fn, col_names = c("gene","type")) %>% subset(type %in% "I")
+
+## Get pcEMT signature expression data:
+pcemt <- pcemt.sig$gene %>%
+  match(genes$gene_symbol) %>% genes$ensemblID[.] %>% 
+  match(exp$geneID) %>% na.omit() %>% 
+  exp[.,]
+rownames(pcemt) <- pcemt$geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.]
+
+pcemt.t <- pcemt[,-1] %>% t() %>% 
+  data.frame() %>% 
+  mutate(ID = rownames(.))
+
+## Expression for the myofibroblastic genes:
+caf_m <- pcemt %>%
+  subset(rownames(.) %in% pcemt.sig.m$gene) %>%
+  .[,-1] %>%
+  t() 
+
+## Expression for the inflammatory genes:
+caf_i <- pcemt %>%
+  subset(rownames(.) %ni% pcemt.sig.m$gene) %>%
+  .[,-1] %>%
+  t() 
+
+## Mean expression scores for the epithelial and mesenchymal portions of the signature:
+caf_scores <- data.frame(CAF.M = caf_m %>% t() %>% colMeans(),
+                           CAF.I = caf_i %>% t() %>% colMeans(),
+                           ID = rownames(caf_m)
+                           )# %>% filter(pcEMT.M > 0 & pcEMT.E > 0)
+```
+```{r}
+pcemt_gene_annot <- pcemt.sig$type %>% 
+  data.frame(row.names=pcemt.sig$gene, type=.)
+
+## Entire signature:
+caf_phm <- HM_hyp_scores.mat
+  # t() %>% scale()
+
+len_out <- 101
+breaks <- c(seq(min(caf_phm, na.rm=T), 0, length.out=ceiling(len_out/2) + 1), 
+              seq(max(caf_phm, na.rm=T)/len_out,
+                  max(caf_phm, na.rm=T),
+                  length.out=floor(len_out/2)))
+
+pheatmap(caf_phm,
+         # scale = "column",
+         clustering_distance_rows = "euclidean", clustering_distance_cols = "canberra",
+         clustering_method = "ward.D",
+         color = colorRampPalette(paletteer_c("viridis::plasma", n=len_out))(len_out),
+         # color = colorRampPalette(c("blue","grey80","red"))(len_out), breaks = breaks,
+         #annotation_col = pcemt_gene_annot,
+         angle_col = 90, show_rownames = F, treeheight_row = 2, treeheight_col = 1,
+         main = "CAF Hallmark Hypoxia Signature",
+         # main = "pcEMT signature: Full signature (z-scored gene expression)",
+         # file = 
+         )
+```
+```{r}
+#n_occur <- data.frame(table(duct_expr$geneID))
+#identify duplicated genes
+```
+
+```{r}
+#creat new seurat object
+library(Seurat)
+library(dplyr)
+library(Matrix)
+# Initialize the Seurat object with the raw (non-normalized data)
+# Note that this is slightly different than the older Seurat workflow, where log-normalized values were passed in directly.
+# You can continue to pass in log-normalized values, just set do.logNormalize=F in the next step.
+
+hyp_exp <- hall_hyp_exp
+
+#duct_expr <- readRDS("Z:/KMK/R files/ductal_cell_exp_matrix.rds")
+#duct_expr <- duct_expr[!rownames(duct_expr) %in% c("ENSG00000233280","ENSG00000215699"),]
+
+#hall_hyp_exp_duct <- match(hyp_genes, duct_expr$geneID) %>% na.omit() %>% duct_expr[.,] %>% data.frame()
+
+fibrodata_hyp <- hyp_exp[,-1]
+rownames(fibrodata_hyp)<- hyp_exp$geneID
+
+#ductaldata_hyp <- hall_hyp_exp_duct[,-1]
+
+#rownames(ductaldata_hyp)<- hall_hyp_exp_duct$geneID
+
+seuratdata <- fibrodata_hyp #%>% data.matrix()
+
+seuratdata2 <- seuratdata
+### seurat<-CreateSeuratObject(raw.data = counts, ? = 3, ? = 350, project = "10X_NSCLC")
+seurat <- CreateSeuratObject(counts = seuratdata, project = "Elyada_analysis", min.cells = 0, min.features = 0)
+
+#View original data
+seurat@assays$RNA[1:10,1:10]
+```
+
+```{r}
+# Can look at metadata features by Violin plot,
+# Useful for setting thresholds on data
+
+VlnPlot(object = seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+```
+
+```{r}
+
+seurat <- FindVariableFeatures(seurat, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(seurat), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(seurat)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1
+plot2
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+#library(CountClust)
+
+#scale the data
+seurat@meta.data$barcode <- row.names(seurat@meta.data)
+
+VlnPlot(object = seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+seurat <- NormalizeData(object = seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+seurat <- FindVariableFeatures(object = seurat, 
+                          mean.function = ExpMean, 
+                          dispersion.function = LogVMR, 
+                          do.plot = FALSE)
+
+
+all.genes <- rownames(seurat)
+
+seurat <- ScaleData(seurat, features = all.genes)
+
+seurat@meta.data$hif_score <- hif_scores[,1]
+seurat@meta.data$HM_hyp_score <- HM_hyp_scores[,1]
+
+orig_clusters <- match(orig_tsne$Cell, hif_scores$ID) %>% na.omit() %>% orig_tsne[.,] %>% data.frame()
+seurat@meta.data$orig_clusters <- orig_clusters[,5]
+
+HM_hypoxia_scores_boxplot <- cbind(orig_clusters[,-c(1,2,3,4)], HM_hyp_scores[,1])
+HM_hyp_box_2 <- cbind(HM_hypoxia_scores_boxplot, hif_scores[,1])
+
+colnames(HM_hypoxia_scores_boxplot) <- c("Cluster", "HM_hypoxia_score")
+
+colnames(HM_hyp_box_2) <- c("Cluster", "HM_hypoxia_score","hif_score")
+
+```
+
+
+```{r}
+#Perform PCA
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
+# Examine and visualize PCA results a few different ways
+print(seurat[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
+DimPlot(seurat, reduction = "pca")
+
+DimHeatmap(seurat, dims = 1:15, cells = 500, balanced = TRUE)
+
+```
+```{r}
+seurat <- FindNeighbors(seurat, dims = 1:15)
+seurat <- FindClusters(seurat, resolution = .05, algorithm = 3, group.singletons = TRUE, modularity.fxn = 1)
+
+```
+```{r}
+#seurat <-RunTSNE(seurat, reduction.use = "pca", dims.use = 1:10, perplexity=30)
+seurat <-RunUMAP(seurat, dims = 1:10)
+
+# note that you can set do.label=T to help label individual clusters
+#TSNEPlot(object = seurat)
+
+DimPlot(object = seurat, reduction = 'umap')
+DimPlot(object = seurat, reduction = 'pca')
+
+```
+
+```{r}
+new.cluster.ids <- c("Hyp-","Hyp+")
+names(new.cluster.ids) <- levels(seurat)
+seurat <- RenameIdents(seurat, new.cluster.ids)
+
+DimPlot(object = seurat, label = TRUE, reduction = 'umap')
+
+FeaturePlot(object = seurat, features = "hif_score")
+
+VlnPlot(object = seurat, features = "HM_hyp_score")
+VlnPlot(object = seurat, features = "hif_score")
+
+FeaturePlot(object = seurat, features = "orig_clusters")
+```
+```{r}
+hyp_idents <- seurat@active.ident
+```
+
+#Full dataset
+```{r}
+fibrodata1 <- exp.symbol[-c(10311,10312,10313,10314,10315),]
+#fibrodata1 <- hall_hyp_exp
+
+
+fibrodata <- fibrodata1[,-1]
+rownames(fibrodata)<- fibrodata1$geneID
+
+seuratdata <- fibrodata #%>% data.matrix()
+
+seuratdata2 <- seuratdata
+### seurat<-CreateSeuratObject(raw.data = counts, ? = 3, ? = 350, project = "10X_NSCLC")
+full_seurat <- CreateSeuratObject(counts = seuratdata, project = "Elyada_analysis", min.cells = 0, min.features = 0)
+
+#View original data
+full_seurat@assays$RNA[1:10,1:10]
+#scale the data
+full_seurat@meta.data$barcode <- row.names(full_seurat@meta.data)
+
+VlnPlot(object = full_seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+full_seurat <- NormalizeData(object = full_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+full_seurat <- FindVariableFeatures(object = full_seurat, 
+                          mean.function = ExpMean, 
+                          dispersion.function = LogVMR, 
+                          do.plot = FALSE)
+
+
+all.genes <- rownames(full_seurat)
+
+full_seurat <- ScaleData(full_seurat, features = all.genes)
+
+full_seurat@meta.data$hif_score <- hif_scores[,1]
+full_seurat@meta.data$HM_hyp_score <- HM_hyp_scores[,1]
+
+orig_clusters <- match(orig_tsne$Cell, hif_scores$ID) %>% na.omit() %>% orig_tsne[.,] %>% data.frame()
+full_seurat@meta.data$orig_clusters <- orig_clusters[,5]
+
+HM_hypoxia_scores_boxplot <- cbind(orig_clusters[,-c(1,2,3,4)], HM_hyp_scores[,1])
+HM_hyp_box_2 <- cbind(HM_hypoxia_scores_boxplot, hif_scores[,1])
+
+colnames(HM_hypoxia_scores_boxplot) <- c("Cluster", "HM_hypoxia_score")
+
+colnames(HM_hyp_box_2) <- c("Cluster", "HM_hypoxia_score","hif_score")
+
+```
+```{r}
+full_seurat <- FindVariableFeatures(full_seurat, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(full_seurat), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(full_seurat)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1
+plot2
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+#library(CountClust)
+
+#scale the data
+full_seurat@meta.data$barcode <- row.names(full_seurat@meta.data)
+
+VlnPlot(object = full_seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+full_seurat <- NormalizeData(object = full_seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+full_seurat <- FindVariableFeatures(object = full_seurat, 
+                          mean.function = ExpMean, 
+                          dispersion.function = LogVMR, 
+                          do.plot = FALSE)
+
+
+all.genes <- rownames(full_seurat)
+
+full_seurat <- ScaleData(full_seurat, features = all.genes)
+
+full_seurat@meta.data$hif_score <- hif_scores[,1]
+full_seurat@meta.data$HM_hyp_score <- HM_hyp_scores[,1]
+
+orig_clusters <- match(orig_tsne$Cell, hif_scores$ID) %>% na.omit() %>% orig_tsne[.,] %>% data.frame()
+full_seurat@meta.data$orig_clusters <- orig_clusters[,5]
+
+HM_hypoxia_scores_boxplot <- cbind(orig_clusters[,-c(1,2,3,4)], HM_hyp_scores[,1])
+HM_hyp_box_2 <- cbind(HM_hypoxia_scores_boxplot, hif_scores[,1])
+
+colnames(HM_hypoxia_scores_boxplot) <- c("Cluster", "HM_hypoxia_score")
+
+colnames(HM_hyp_box_2) <- c("Cluster", "HM_hypoxia_score","hif_score")
+
+```
+```{r}
+#Perform PCA
+full_seurat <- RunPCA(full_seurat, features = VariableFeatures(object = full_seurat))
+# Examine and visualize PCA results a few different ways
+print(full_seurat[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(full_seurat, dims = 1:2, reduction = "pca")
+DimPlot(full_seurat, reduction = "pca")
+
+DimHeatmap(full_seurat, dims = 1:15, cells = 500, balanced = TRUE)
+
+```
+
+
+```{r}
+full_seurat <- FindNeighbors(full_seurat, dims = 1:10)
+full_seurat <- FindClusters(full_seurat, resolution = .05)
+```
+```{r}
+full_seurat <-RunTSNE(full_seurat, reduction.use = "pca", dims.use = 1:10, perplexity=30)
+full_seurat <-RunUMAP(full_seurat, dims = 1:10)
+
+# note that you can set do.label=T to help label individual clusters
+TSNEPlot(object = full_seurat)
+
+DimPlot(object = full_seurat, reduction = 'umap')
+
+```
+```{r}
+new.cluster.ids <- c("myCAF","iCAF")
+names(new.cluster.ids) <- levels(full_seurat)
+full_seurat <- RenameIdents(full_seurat, new.cluster.ids)
+
+DimPlot(object = full_seurat, reduction = 'umap')
+
+```
+```{r}
+full_seurat@meta.data$Hyp_state <- hyp_idents
+
+```
+```{r}
+VlnPlot(full_seurat, group.by = "Hyp_state", features = c("CXCR4"))
+
+VlnPlot(full_seurat, group.by = "Hyp_state", features = c("IGF1","IGF2"))
+
+VlnPlot(full_seurat, group.by = "Hyp_state", features = c("TGFB1","TGFB2","TGFB3"))
+
+VlnPlot(full_seurat, group.by = "Hyp_state", features = c("EIF3A","EIF3B","EIF3C","EIF3D","EIF3E","EIF3F","EIF3G","EIF3H","EIF3I","EIF3J","EIF3K","EIF3L","EIF3M"))
+
+
+```
+#Running UCell
+```{r}
+library(UCell)
+
+signatures <- list(Hallmark_Hypoxia = c(hyp_genes), HIF_sig = c(hif.sig), CosMX = c(overlapping_genes),currated_cosmx_sig = c("EGFR","IL6","VHL","DUSP1","VEGFA","LDHA","FOS","JUN","CXCR4","CAV1", "DCN","COL5A1","ANXA2","SLC2A1","NDRG1"))
+
+seurat.object <- AddModuleScore_UCell(full_seurat, features = signatures, name = NULL,
+    ncores = 4)
+
+Ucell_scores <- seurat.object@meta.data$Hallmark_Hypoxia
+Ucell_scores1 <- seurat.object@meta.data$CosMX
+currated_cellscore <- seurat.object@meta.data$currated_cosmx_sig
+```
+
+#Extract data from Seurat
+```{r}
+full_data <- GetAssay(object = full_seurat, assay = "RNA", slot = "counts")
+
+full_df <- as.data.frame(t(full_data["counts"]))
+
+full_df_idents <- cbind(full_df, hyp_idents)
+
+hyp_caf <- nrow(filter(full_df_idents, hyp_idents == "Hyp-"))
+```
+#Cbind ucell scores
+```{r}
+library(ggprism)
+library(tidyverse)
+library(ggsignif)
+
+full_df_idents <- read.csv("Z:/KMK/R files/scRNA_seq_Fibroblast_only_fraction_2021_01_29/full_df_hyp_idents.csv")
+full_df_idents_2 <- cbind(full_df_idents, Ucell_scores,Ucell_scores1,currated_cellscore)
+
+sum(full_df_idents_2$hyp_idents == "Hyp-")
+
+N<- ggplot(full_df_idents_2, aes(x = hyp_idents, y= currated_cellscore, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  #scale_x_discrete(limits=c("21% O2","1% O2"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("Hallmark Hypoxia UCell Score") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  #scale_y_continuous(limits = c(0, .35), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(.3), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+
+#Leave out this code
+```{r}
+library(UCell)
+library(Matrix)
+
+#signatures <- list(Hallmark_Hypoxia = c(hyp_genes), HIF_sig = c(hif.sig))
+#signatures <- list(CosMX = c(overlapping_genes))
+#rownames(fibrodata1) <- fibrodata1$geneID
+#exp.matrix <- t(fibrodata1)[-1,]
+
+#exp.dataframe <- as.data.frame(exp.matrix) %>% as_tibble()
+
+#u.scores <- ScoreSignatures_UCell(exp.dataframe, features = signatures)
+#u.scores[1:8, 1:2]
+
+#full_df_idents_2 <- cbind(full_df_idents, u.scores)
+
+
+N<- ggplot(full_df_idents_2, aes(x = hyp_idents, y= hif_score, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  #scale_x_discrete(limits=c("21% O2","1% O2"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("IGF1 Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 1), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+
+```{r}
+N4<- ggplot(full_df_idents_2, aes(x = hyp_idents, y= NOX4, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  #scale_x_discrete(limits=c("21% O2","1% O2"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("NOX4 Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 1), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+
+D1<- ggplot(full_df_idents_2, aes(x = hyp_idents, y= LDHA, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  #scale_x_discrete(limits=c("21% O2","1% O2"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("LDHA Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 4), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.6), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+D1
+```
+```{r}
+D1<- ggplot(full_df_idents, aes(x = hyp_idents, y= NNMT, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  geom_boxplot(fill = "white", width = 0.07) + 
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("NNMT Expression") +
+  xlab("") +
+  scale_y_continuous(limits = c(0, 5), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(4.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+D1
+
+D2<- ggplot(full_df_idents, aes(x = hyp_idents, y= AOX1, group = hyp_idents, fill = hyp_idents))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  geom_boxplot(fill = "white", width = 0.07) + 
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("AOX1 Expression") +
+  xlab("") +
+  scale_y_continuous(limits = c(0, 3), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5))#+
+  #geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+  #    y_position = c(2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+D2
+
+D1+D2
+```
+#Supplementary Figure S4. Hypoxic CAFs support cancer cell EMT 
+##Consensus clustering 
+###Preparing data for Consensus clustering
+```{r}
+ID <- rownames(full_df)
+hallhyp_scores <- as.data.frame(cbind(ID, Ucell_scores))
+hallhyp_scores$Ucell_scores <-  as.numeric(hallhyp_scores$Ucell_scores)
+
+set.seed(123) # For reproducibility
+embedding2 <- umap::umap(fibrodata_hyp[,-1] %>% t(), 
+                        n_neighbors = 15, min_dist = .01,
+                        n_components = 2
+                        )
+```
+```{r}
+
+pltdata2 <- embedding2$layout %>%
+  data.frame() %>%
+  mutate(ID = rownames(.)) %>%
+  full_join(hallhyp_scores, by="ID") #%>%
+  #full_join(pcemt.t, by="ID") 
+
+ggplot(pltdata2, aes(X1,X2, label = ID,
+                     color = Ucell_scores)) +
+    geom_point() +
+    scale_color_viridis_c(option="inferno") +
+    theme_cowplot(8, rel_small=1, rel_tiny=1, rel_large=1) + #theme_cust(ticks=F,axis="both",box=T) +
+    labs(title="CAF: Hallmark Hypoxia Signature", x = "UMAP1", y = "UMAP2")
+```
+### ConsensusClusterPlus (CCP)
+### CAF: Hallmark Hypoxia signature
+```{r pcEMT CCP calculations}
+library(ConsensusClusterPlus)
+##################### pcEMT mesenchymal genes: UMAP embedding #####################
+## Data to cluster (cells/samples as columns) on UMAP embedding of pcEMT-M subsignature gene expression:
+ccpdata1 <- embedding2$layout %>% t() # UMAP embedding of cells using the pcEMT-M subsignature
+
+## Run (CCP) consensus clustering:
+results1 <- ConsensusClusterPlus(ccpdata1,
+                                 seed = 123, 
+                                 distance="euclidean", innerLinkage = "ward.D2", finalLinkage = "ward.D2",
+                                 pItem=0.8, pFeature = 1, verbose=T,
+                                 clusterAlg = "pam"
+                                 )
+icl1 <- calcICL(results1) # get cluster assignments for all numbers of k
+```
+```{r Annotate cells with CCP clusters, warning=F, message=F}
+## Merge consensus clustering results with enrichment scores, gene set scores, expression data, etc.:
+num_k = 2 # how many clusters to ask from consensus clustering
+
+ccp.pltdata_pas <- icl1[["itemConsensus"]] %>% 
+  filter(k==num_k) %>%
+  group_by(item) %>% filter(itemConsensus == max(itemConsensus)) %>% 
+  dplyr::select(item, cluster) %>% 
+  # dplyr::mutate(cluster=factor(cluster)) %>% 
+  dplyr::rename(ID = item) %>% 
+  # full_join(pltdata2, by="ID")
+  full_join(pltdata2, by="ID")
+
+if(num_k==2){ # if asked for 2 consensus clusters, label as mesenchymal-low (E+/M-) or -high (E+/M+)
+  ccp.labels <- c("Hyp-","Hyp+")
+  ccp.pltdata_pas <- ccp.pltdata_pas %>%
+    mutate(cluster = ccp.labels[cluster]) %>% 
+    mutate(cluster=factor(cluster, levels=ccp.labels))
+}
+
+ccp_savedata <- ccp.pltdata_pas %>% dplyr::select(ID, cluster, X1, X2) %>% 
+  dplyr::rename(UMAP1=X1, UMAP2=X2)
+#write.csv(ccp_savedata, file="CAF_hallmark_hyp_annotation.csv", row.names=F)
+```
+
+```{r}
+heatmap_cols1 <- c("#00A1D5","#DF8F44")
+
+
+ccp.pltdata_pas %>% 
+  mutate(cluster = factor(cluster, levels=c("Hyp-","Hyp+"))) %>% 
+ggplot(aes(x=X1, y=X2, label=cluster, color=cluster)) + 
+    geom_point(alpha=1, size=2) + 
+    scale_color_manual(values=heatmap_cols1) +
+    theme_classic(base_size = 10) + 
+    theme(legend.position = c(1, .85), legend.justification = c("right", "top"), legend.margin=margin(1.1,1.1,1.1,1.1),
+          legend.box.background=element_rect(color="black"),
+          axis.text=element_blank(), axis.ticks=element_blank(),
+          ) +
+    labs(title="Human CAFs:\ Hallmark Hypoxia signature embedding", x = "UMAP1", y = "UMAP2",
+         color="Consensus\ncluster", shape="Consensus\ncluster") 
+```
+
+```{r}
+library(ggsignif)
+
+wilcox.test(Ucell_scores ~ cluster, data =  ccp.pltdata_pas)
+
+N<- ggplot(ccp.pltdata_pas, aes(x = cluster, y= Ucell_scores, group = cluster, fill = cluster))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  scale_x_discrete(limits=c("Hyp-","Hyp+"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("Hallmark Hypoxia UCell Score") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, .32), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5, color = "black"))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5,color = "black"))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(.28), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+
+```{r}
+full_df_up <- full_df
+full_df_up$ID <- rownames(full_df)
+
+new_clust_data <- ccp.pltdata_pas %>%
+  data.frame() %>%
+  full_join(full_df_up, by="ID") #%>%
+  #full_join(pcemt.t, by="ID") 
+
+wilcox.test(IGF2 ~ cluster, data =  new_clust_data)
+
+N<- ggplot(new_clust_data, aes(x = cluster, y= IGF2, group = cluster, fill = cluster))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  scale_x_discrete(limits=c("Hyp-","Hyp+"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("IGF2 Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 4), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5, color = "black"))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5,color = "black"))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+```{r}
+
+wilcox.test(IGF1 ~ cluster, data =  new_clust_data)
+
+N<- ggplot(new_clust_data, aes(x = cluster, y= IGF1, group = cluster, fill = cluster))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  scale_x_discrete(limits=c("Hyp-","Hyp+"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("IGF1 Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 4), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5, color = "black"))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5,color = "black"))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+```{r}
+wilcox.test(LDHA ~ cluster, data =  new_clust_data)
+
+N<- ggplot(new_clust_data, aes(x = cluster, y= LDHA, group = cluster, fill = cluster))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  scale_x_discrete(limits=c("Hyp-","Hyp+"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("LDHA Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 4), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5, color = "black"))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5,color = "black"))+
+  geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+      y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+```{r}
+#wilcox.test(NOX4 ~ cluster, data =  new_clust_data)
+
+N<- ggplot(new_clust_data, aes(x = cluster, y= NOX4, group = cluster, fill = cluster))+
+  geom_violin(width=.9, linewidth=1.5, scale = 'width') +
+  #geom_jitter(width = .2, size = .01, stroke = 1.,color='darkgrey')+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_boxplot(color="black", width = .65, size = 1., linewidth = 1) +
+  scale_x_discrete(limits=c("Hyp-","Hyp+"))+
+  #scale_color_manual(values=c("black","black","black","black","black","black","black","black"))+
+  scale_fill_manual(values=c("#00A1D5","#DF8F44"))+
+  #guides(y = "prism_offset_minor") + 
+  #theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme_classic(base_size = 24)+
+  theme(legend.position = "none") +
+  ylab("NOX4 Expression") +
+  xlab("") +
+  #geom_hline(yintercept = 655, color = "red")+
+  #geom_hline(yintercept = 913.86, color = "red")+
+  scale_y_continuous(limits = c(0, 4), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, 
+                                  size = 22, hjust = .5, color = "black"))+
+  theme(axis.text.y = element_text(size = 22, hjust = .5,color = "black"))+
+  #geom_signif(comparisons=list(c("Hyp-","Hyp+")), annotations=c("****"),
+  #    y_position = c(3.2), tip_length = 0, vjust=0.4, size=1.25, textsize=11, color = "black")
+  #facet_grid(~factor(Condition))#+
+N
+```
+
