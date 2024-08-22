@@ -1,0 +1,867 @@
+---
+title: "scRNA-seq NicheNet"
+author: "Karl Kowalewski"
+date: "5/4/2021"
+output: html_document
+---
+##Loading packages
+```{r Load packages, message=F, warning=F}
+library(tidyverse)
+library(magrittr)
+library(ggsci)
+library(paletteer)
+library(cowplot)
+library(parallel)
+library(RColorBrewer)
+library(ggrepel)
+library(pheatmap)
+library(GEOquery)
+library(limma)
+library(umap)
+```
+```{r}
+### Clear R workspace:
+rm(list=ls())
+```
+```{r}
+### Check current working directory:
+cwd <- getwd()
+cwd
+```
+```{r}
+`%ni%` <- Negate(`%in%`)
+
+```
+
+
+```{r}
+## Ensembl ID-to-gene symbol annotations:
+fn.genes <- "genes.tsv"
+genes <- read_tsv(fn.genes, col_names = F)
+
+colnames(genes) <- c("ensemblID","gene_symbol")
+
+
+## Load Entrez gene IDs that match ENSEMBL IDs:
+fn.entrez <- "entrezIDs.csv"
+file.exists(fn.entrez)
+```
+
+```{r}
+###Import clusters from Elyada paper
+fn.tsne <- "fibroblast_tsne2.csv"
+orig_tsne <- read.csv(fn.tsne)
+```
+
+```{r}
+if(file.exists(fn.entrez)){
+  entrezIDs <- read.csv(fn.entrez)
+} 
+
+## Use biomaRt to get ENTREZ gene IDs if the file doesn't exist:
+if(!exists("entrezIDs")){
+  library(biomaRt)
+  mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+  entrezIDs <- getBM(
+    filters="ensembl_gene_id",
+    attributes=c("ensembl_gene_id", "entrezgene_id"),
+    values=genes$ensemblID,
+    mart=mart)
+  entrezIDs$entrezgene_id[entrezIDs$ensembl_gene_id=="ENSG00000227953"] <- 149134 # ENTREZ ID for LOC149134 gene
+  write.csv(entrezIDs,"entrezIDs.csv",row.names = F)
+}
+```
+
+```{r}
+## First, decide whether we want data with low-variance genes filtered out (by the original authors) or the full set of expression data:
+which_data_to_use <- "filtered" # use "full" to indicate the full set of genes; otherwise, will use the pre-filtered data set for ductal cell
+
+## File names/paths:
+fn.fibroexp <- "fibroblast_expression.csv" # file with filtered ductal cell gene expression
+
+fn.exp <- "human_combined_expression.csv" # file with all gene expression for all cells
+
+fn.fibroexp.all <- "human_fibroblast_expression_all.csv"
+    
+
+if(which_data_to_use == "full"){
+  if(file.exists(fn.ductexp.all)){ # if expression of all genes in ductal cells has been extracted, load the file
+        all.exp <- read_csv(fn.fibroexp.all, col_names = T) %>%
+        # all.exp <- read_csv(fn.ductexp, col_names=T) %>% 
+          # dplyr::rename(geneID = X1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+
+      } else { # otherwise, get the data for all genes in ductal cells
+        ductal_names <- read_csv(fn.fibroexp, col_names=F, n_max=1)[,-1] %>%
+        t() # barcodes for ductal cells
+        all.exp <- read_csv(fn.exp, col_names=T)[,c("...1", ductal_names)] %>% # get expression data for all genes in ductal cells
+          dplyr::rename(geneID = ...1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+        write.csv(all.exp, file="human_fibro_expression_all.csv", row.names = F,
+                  col.names = T)
+      }
+  
+  } else {
+  all.exp <- read_csv(fn.fibroexp, col_names=T) %>% 
+    dplyr::rename(geneID = ...1) %>% 
+    data.frame()
+  all.spls <- colnames(all.exp)[-1] %>% 
+    data.frame(ID=.)
+}
+```
+
+```{r Load the single-cell data}
+## First, decide whether we want data with low-variance genes filtered out (by the original authors) or the full set of expression data:
+#which_data_to_use <- "filtered" # use "full" to indicate the full set of genes; otherwise, will use the pre-filtered data set for ductal cell
+
+## File names/paths:
+fn.ductexp <- "ductal_expression.csv" # file with filtered ductal cell gene expression
+
+#fn.exp <- "../scRNAseq data/1_human_combined/human_combined_expression.csv" # file with all gene expression for all cells
+
+fn.ductexp.all <- "human_ductal_expression_all.csv"
+    
+
+if(which_data_to_use == "full"){
+  if(file.exists(fn.ductexp.all)){ # if expression of all genes in ductal cells has been extracted, load the file
+        all.ductexp <- read_csv(fn.ductexp.all, col_names = T) %>%
+        # all.exp <- read_csv(fn.ductexp, col_names=T) %>% 
+          # dplyr::rename(geneID = X1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+
+      } else { # otherwise, get the data for all genes in ductal cells and write to a csv file
+        ductal_names <- read_csv(fn.ductexp, col_names=F, n_max=1)[,-1] %>%
+        t() # barcodes for ductal cells
+        all.ductexp <- read_csv(fn.ductexp, col_names=T)[,c("...1", ductal_names)] %>% # get expression data for all genes in ductal cells
+          dplyr::rename(geneID = ...1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+        write.csv(all.ductexp, file="human_ductal_expression_all.csv", row.names = F,
+                  col.names = T)
+      }
+  
+  } else { # otherwise, load the pre-filtered gene expression data from the paper
+  all.ductexp <- read_csv(fn.ductexp, col_names=T) %>% 
+    dplyr::rename(geneID = ...1) %>% 
+    data.frame()
+  all.spls <- colnames(all.exp)[-1] %>% 
+    data.frame(ID=.)
+}
+
+```
+
+```{r}
+## Get barcodes for adjacent normal sample cells:
+normal_cells <- all.exp %>% 
+  colnames() %>% 
+  str_detect("7|9") %>% 
+  colnames(all.exp)[.]
+
+## Get expression data for tumor cells only:
+exp <- all.exp %>%
+  dplyr::select(-all_of(normal_cells)) %>% # remove cells from adjacent normal tissue
+  dplyr::select(-contains("6")) # remove cells from sample hT143 (not a PDAC sample)
+rownames(exp) <- exp$geneID
+```
+```{r}
+## Expression data with Entrez gene IDs:
+exp.entrez <- exp %>% 
+  mutate(geneID = geneID %>% match(entrezIDs$ensembl_gene_id) %>% entrezIDs$entrezgene_id[.])
+
+## Expression data with gene symbols:
+exp.symbol <- exp %>% 
+  mutate(geneID = geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+## Sample annotation data:
+spls <- colnames(exp)[-1] %>% 
+  data.frame(ID=.)
+
+## Filter out zero-variance genes:
+zeroVar <- which((exp[,-1] %>% apply(MARGIN=1, FUN=var, na.rm=TRUE)) == 0)
+zeroVarGenes <- exp[zeroVar,] # genes with zero variance
+ exp.filt <- exp[-zeroVar, ] # expression data without zero-variance genes
+ exp <- exp[-zeroVar, ] # expression data without zero-variance genes
+```
+
+```{r}
+## Get barcodes for adjacent normal sample cells:
+normal_cells <- all.ductexp %>% 
+  colnames() %>% 
+  str_detect("7|9") %>% 
+  colnames(all.ductexp)[.]
+
+## Get expression data for tumor cells only:
+ductexp <- all.ductexp %>%
+  dplyr::select(-all_of(normal_cells)) %>% # remove cells from adjacent normal tissue
+  dplyr::select(-contains("6")) # remove cells from sample hT143 (not a PDAC sample)
+rownames(ductexp) <- ductexp$geneID
+```
+
+```{r}
+## Expression data with Entrez gene IDs:
+ductexp.entrez <- ductexp %>% 
+  mutate(geneID = geneID %>% match(entrezIDs$ensembl_gene_id) %>% entrezIDs$entrezgene_id[.])
+
+## Expression data with gene symbols:
+ductexp.symbol <- ductexp %>% 
+  mutate(geneID = geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+## Sample annotation data:
+spls <- colnames(ductexp)[-1] %>% 
+  data.frame(ID=.)
+
+## Filter out zero-variance genes:
+zeroVar <- which((ductexp[,-1] %>% apply(MARGIN=1, FUN=var, na.rm=TRUE)) == 0)
+zeroVarGenes <- ductexp[zeroVar,] # genes with zero variance
+ ductexp.filt <- ductexp[-zeroVar, ] # expression data without zero-variance genes
+ ductexp <- ductexp[-zeroVar, ] # expression data without zero-variance genes
+```
+##Fibroblast Expression
+```{r}
+CAF.data <- exp.symbol[-c(10311,10312,10313,10314,10315),-1]
+rownames(CAF.data) <- exp.symbol[-c(10311,10312,10313,10314,10315),]$geneID
+CAF.t <- CAF.data %>% t() %>% 
+  data.frame() %>% 
+  mutate(ID = rownames(.))
+```
+##Ductal Cell Expression
+```{r}
+library(Hmisc)
+
+rows_to_remove <- c("ENSG00000080200","ENSG00000215699","ENSGGENES","ENSGUMI")
+
+ductgenefilt = ductexp.symbol[which(rownames(ductexp.symbol) %nin% rows_to_remove), ]
+
+ductal.data <- ductgenefilt[,-1]
+rownames(ductal.data) <- ductgenefilt$geneID
+ductal.t <- ductal.data %>% t() %>% 
+  data.frame() %>% 
+  mutate(ID = rownames(.))
+```
+```{r}
+fibro_expressed_genes <- CAF.t %>% t()
+ductal_expressed_genes <- ductal.t %>% t()
+```
+```{r}
+library(nichenetr)
+library(tidyverse)
+
+fibro_expressed_genes <- apply(CAF.t, 2, as.numeric)
+
+expressed_genes_sender = fibro_expressed_genes %>% apply(2,function(x){10*(2**x - 1)}) %>% apply(2,function(x){log2(mean(x) + 1)}) %>% .[. >= 0.3] %>% names()
+
+###############################
+
+ductal.t <- apply(ductal.t, 2, as.numeric)
+
+expressed_genes_receiver = ductal.t %>% apply(2,function(x){10*(2**x - 1)}) %>% apply(2,function(x){log2(mean(x) + 1)}) %>% .[. >= 0.3] %>% names()
+
+length(expressed_genes_sender)
+length(expressed_genes_receiver)
+```
+```{r}
+ligand_target_matrix = readRDS("C:/Users/karlm/OneDrive - University of Virginia/Documents/R/ligand_target_matrix.rds")
+ligand_target_matrix[1:5,1:5] # target genes in rows, ligands in columns
+
+geneset_oi <- c("ADAM12", "ADAMTS12", "ADAMTS2",
+             "AEBP1","ANGPTL2","ANTXR1","AXL","BNC2","CALD1",
+             "CDH2","CMTM3","CNRIP1","COL10A1","COL1A1","COL1A2","COL3A1",
+             "COL5A1","COL5A2","COL6A1","COL6A2","COL6A3","COL8A1","DACT1",
+             "EMP3","FAP","FBN1","FN1","FSTL1","GPC6","GYPC","HTRA1","INHBA",
+             "ITGA11","LOXL2","LRRC15","MMP2","MSRB3","NAP1L3","NID2","OLFML2B",
+             "PCOLCE","PDGFRB","PMP22","POSTN","SPARC","SPOCK1","SULF1","SYT11",
+             "THBS2","VCAN","VIM","ZEB1","ZEB2","SNAI1","SNAI2")
+
+#geneset_oi <- c("ADAM12", "AEBP1", "AXL",
+#             "BNC2","CALD1","CDH2","CMTM3","CNRIP1","COL10A1",
+#             "COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1","COL6A2",
+#             "COL6A3","COL8A1","DACT1","EMP3","FAP","FBN1","FN1",
+#             "FSTL1","INHBA","VIM","ZEB2","IL6","CXCR4")
+
+
+#geneset_oi = readr::read_tsv(url("https://zenodo.org/record/3260758/files/pemt_signature.txt"), col_names = "gene") %>% pull(gene) %>% .[. %in% rownames(ligand_target_matrix)] # only consider genes also present in the NicheNet model - this excludes genes from the gene list for which the official HGNC symbol was not used by Puram et al.
+
+#geneset_oi <- panEMT.M
+head(geneset_oi)
+```
+```{r}
+#panEMT <- read.delim("Pan-cancer-EMT-signature_2.txt")
+
+#EMT_genes <- as.character(panEMT[,-2])
+
+
+```
+
+```{r}
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+head(background_expressed_genes)
+```
+```{r}
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+
+# If wanted, users can remove ligand-receptor interactions that were predicted based on protein-protein interactions and only keep ligand-receptor interactions that are described in curated databases. To do this: uncomment following line of code:
+# lr_network = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+
+ligands = lr_network %>% pull(from) %>% unique()
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+
+receptors = lr_network %>% pull(to) %>% unique()
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+lr_network_expressed = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) 
+head(lr_network_expressed)
+```
+```{r}
+potential_ligands = lr_network_expressed %>% pull(from) %>% unique()
+head(potential_ligands)
+```
+```{r}
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+```
+
+```{r}
+ligand_activities %>% arrange(-pearson) 
+best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand)
+head(best_upstream_ligands)
+```
+```{r}
+p_hist_lig_activity = ggplot(ligand_activities, aes(x=pearson)) + 
+  geom_histogram(color="black", fill="darkorange")  + 
+  # geom_density(alpha=.1, fill="orange") +
+  geom_vline(aes(xintercept=min(ligand_activities %>% top_n(20, pearson) %>% pull(pearson))), color="red", linetype="dashed", size=1) + 
+  labs(x="ligand activity (PCC)", y = "# ligands") +
+  theme_classic()
+p_hist_lig_activity
+```
+```{r}
+active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 250) %>% bind_rows()
+```
+
+```{r}
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.25)
+
+```
+
+#Rework this code to ligands/receptors that I want
+```{r}
+order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev()
+order_targets = active_ligand_target_links_df$target %>% unique()
+vis_ligand_target = active_ligand_target_links[order_targets[-19],order_ligands] %>% t()
+
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized CAF-ligands","Pan-Cancer EMT genes in malignant cells", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential") + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.005,0.01)) + theme(axis.text.x = element_text(face = "italic"))
+
+p_ligand_target_network
+```
+```{r}
+# get the ligand-receptor network of the top-ranked ligands
+lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+# get the weights of the ligand-receptor interactions as used in the NicheNet model
+weighted_networks = readRDS("C:/Users/karlm/OneDrive - University of Virginia/Documents/R/scRNAseq NicheNet/weighted_networks.rds")
+lr_network_top_df = weighted_networks$lr_sig %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+
+# convert to a matrix
+lr_network_top_df = lr_network_top_df %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+# perform hierarchical clustering to order the ligands and receptors
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+```
+
+```{r}
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Prioritized CAF-ligands","Receptors expressed by malignant cells", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+```
+```{r}
+library(RColorBrewer)
+library(cowplot)
+library(ggpubr)
+```
+
+```{r}
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+vis_ligand_pearson = ligand_pearson_matrix[order_ligands, ] %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+```
+
+```{r}
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized CAF-ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)")
+p_ligand_pearson
+```
+
+# Testing with my ligands of interest only
+```{r}
+background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+head(background_expressed_genes)
+```
+```{r}
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+
+# If wanted, users can remove ligand-receptor interactions that were predicted based on protein-protein interactions and only keep ligand-receptor interactions that are described in curated databases. To do this: uncomment following line of code:
+# lr_network = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+
+ligands = lr_network %>% pull(from) %>% unique()
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+
+receptors = lr_network %>% pull(to) %>% unique()
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+
+lr_network_expressed = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) 
+head(lr_network_expressed)
+```
+```{r}
+potential_ligands = lr_network_expressed %>% pull(from) %>% unique()
+head(potential_ligands)
+```
+```{r}
+EMT_genes <- read.delim2("Pan-cancer-EMT-signature_M_only.txt")
+EMT_goi <- EMT_genes$geneID
+geneset_oi <- c("ADAM12","ADAMTS12","ADAMTS2","AEBP1","ANGPTL2","ANTXR1","AXL","BNC2","CALD1","CDH2","CMTM3","CNRIP1","COL10A1","COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1","COL6A2","COL6A3","COL8A1","DACT1","EMP3","FAP","FBN1","FN1","FSTL1","GPC6","GYPC","HTRA1","INHBA","ITGA11","LOXL2","LRRC15","MMP2","MSRB3","NAP1L3","NID2","OLFML2B","PCOLCE","PDGFRB","PMP22","POSTN","SPARC","SPOCK1","SULF1","SYT11","THBS2","VCAN","VIM","ZEB2","SNAI1","SNAI2","TWIST1")
+
+ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+```
+
+```{r}
+mygenes <- c("CCL2","CXCL2","CXCL12","CXCL14","IGF1","IGF2","FGF7","C3","IL6","LIF","MDK","INHBA","GRN","HGF")
+
+#mygenes<- c("IGF1","IGF2","OGN","FGF7","C3","CXCL12","NAMPT","CXCL14","CXCL1","CXCL3","LIF","IL6","CCL2","CXCL2")
+
+myCAF_genes <- c("GRN","CLEC11A","MIF","NENF","INHBA","S100A6","IL32")
+```
+
+```{r}
+#ligand_activities %>% arrange(-pearson) 
+#best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand)
+#head(best_upstream_ligands)
+
+mygenes_oi <- ligand_activities %>% filter(test_ligand %in% mygenes)
+```
+
+```{r}
+p_hist_lig_activity = ggplot(ligand_activities, aes(x=pearson)) + 
+  geom_histogram(color="black", fill="darkorange")  + 
+  #insti geom_density(alpha=.1, fill="orange") +
+  geom_vline(aes(xintercept=min(ligand_activities %>% top_n(20, pearson) %>% pull(pearson))), color="red", linetype="dashed", size=1) + 
+  labs(x="ligand activity (PCC)", y = "# ligands") +
+  theme_classic()
+p_hist_lig_activity
+```
+```{r}
+active_ligand_target_links_df1 = mygenes %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 250) %>% bind_rows()
+
+active_ligand_target_links_df <- active_ligand_target_links_df1[-27,]
+```
+
+```{r}
+active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.01)
+
+```
+
+#Rework this code to ligands/receptors that I want
+```{r}
+order_ligands = intersect(mygenes, colnames(active_ligand_target_links)) %>% rev()
+order_targets = active_ligand_target_links_df$target %>% unique()
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized CAF-ligands","Pan-Cancer EMT genes in malignant cells", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential") + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.005,0.01)) + theme(axis.text.x = element_text(face = "italic"))
+
+p_ligand_target_network
+```
+```{r}
+order_ligands = intersect(myCAF_genes, colnames(active_ligand_target_links)) %>% rev()
+order_targets = active_ligand_target_links_df$target %>% unique()
+vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+
+p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized CAF-ligands","Pan-Cancer EMT genes in malignant cells", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential") + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.005,0.01)) + theme(axis.text.x = element_text(face = "italic"))
+
+p_ligand_target_network
+```
+```{r}
+# get the ligand-receptor network of the top-ranked ligands
+lr_network_top = lr_network %>% filter(from %in% mygenes & to %in% expressed_receptors) %>% distinct(from,to)
+best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+
+# get the weights of the ligand-receptor interactions as used in the NicheNet model
+weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+lr_network_top_df = weighted_networks$lr_sig %>% filter(from %in% mygenes & to %in% best_upstream_receptors)
+
+# convert to a matrix
+lr_network_top_df = lr_network_top_df %>% spread("from","weight",fill = 0)
+lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+
+# perform hierarchical clustering to order the ligands and receptors
+dist_receptors = dist(lr_network_top_matrix, method = "binary")
+hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+order_receptors = hclust_receptors$labels[hclust_receptors$order]
+
+dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+```
+
+```{r}
+vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Prioritized CAF-ligands","Receptors expressed by malignant cells", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+p_ligand_receptor_network
+```
+```{r}
+library(RColorBrewer)
+library(cowplot)
+library(ggpubr)
+
+```
+
+```{r}
+ligand_pearson_matrix = ligand_activities %>% select(pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities$test_ligand)
+
+
+vis_ligand_pearson = ligand_pearson_matrix %>% as.matrix(ncol = 1) %>% magrittr::set_colnames("Pearson")
+```
+
+```{r}
+p_ligand_pearson = vis_ligand_pearson %>% make_heatmap_ggplot("Prioritized CAF-ligands","Ligand activity", color = "darkorange",legend_position = "top", x_axis_position = "top", legend_title = "Pearson correlation coefficient\ntarget gene prediction ability)")
+p_ligand_pearson
+```
+
+```{r}
+
+#mygenes <- c("TGFB1","CCL2","CXCL2","CXCL12","CXCL14","IGF1","IGF2","FGF1","FGF2","FGF5","FGF7","C3","IL6","HGF", "GAS6","HBEGF","AREG","EGF","NRG1","EPGN","EREG", "INHBA", "INHBB", "MDK","PLAU")
+
+mygenes <- c("IGF1","IGF2","IL6","FGF2","FGF7","FGF9","FGF18","FGF19", "C3","CXCL12","NAMPT","CXCL14","CCL2","CXCL2","VEGFA","PDGFA", "PDGFB","PDGFC","PDGFD", "GAS6", "PROS1", "INHBA","FAM3C","MANF","MDK","WNT5A","NRG1")
+
+geneset_oi <- c("ADAM12","ADAMTS12","ADAMTS2","AEBP1","ANGPTL2","ANTXR1","AXL","BNC2","CALD1","CDH2","CMTM3","CNRIP1","COL10A1","COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1","COL6A2","COL6A3","COL8A1","DACT1","EMP3","FAP","FBN1","FN1","FSTL1","GPC6","GYPC","HTRA1","ITGA11","LOXL2","MMP2","MSRB3","NAP1L3","NID2","OLFML2B","PCOLCE","PDGFRB","PMP22","POSTN","SPARC","THBS2","VCAN","VIM","ZEB2","SNAI1","SNAI2","TWIST1")
+
+#new geneset
+mygenes <- c("IGF1","IGF2", "IL6", "GAS6","PROS1","ANXA1", "C3","CXCL2","CCL2","CXCL12","HBEGF","NAMPT","AREG","PDGFC","FGF7","FGF9","PDGFD","NRG1","TNFSF10","SCT","MDK")
+
+ligand_target_df <- as.data.frame(ligand_target_matrix)
+
+EMT_targets <- ligand_target_df[geneset_oi,]
+
+Ligand_EMT_target <- EMT_targets[, mygenes]
+
+dt2 <- Ligand_EMT_target %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname)
+head(dt2)
+
+hm <- ggplot(dt2, aes(x = rowname, y = colname, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "white",high = "darkred", space = "Lab",
+  name="Predicted Regulatory
+Potential",limit = c(0.00018,.0085), midpoint = .00065,)+
+  theme_minimal()+# minimal theme
+  #theme_cowplot()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 5, hjust = 1))+
+  theme(axis.text.y = element_text(size = 5, hjust = 1))+
+  scale_y_discrete(limits=mygenes)+
+  ylab("CAF-secreted ligands") +
+  xlab("pcEMT-M genes") +
+  coord_fixed()+
+  theme(aspect.ratio = .4)
+hm
+
+
+hm
+Ligand_EMT_target_matrix <- as.matrix(Ligand_EMT_target)
+
+heatmap(Ligand_EMT_target_matrix, Rowv =NULL, Colv=NA, col = heat.colors(256))#, margins = c(5,10))
+
+pheatmap(Ligand_EMT_target_matrix, display_numbers =F)
+
+Sums <- colSums(Ligand_EMT_target)
+
+mygenesums <- data.frame(mygenes,Sums)
+
+```
+```{r}
+library(tidyverse)  
+library(ggplot2)
+library(ggprism)
+library(ggsignif)
+#library(ggstatsplot)
+library(dplyr)
+library(plyr)
+
+integrated.NicheNet <- as.data.frame(colSums(Ligand_EMT_target))
+integrated.NicheNet$Ligand <- rownames(integrated.NicheNet)
+CAF.list <- c("iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","myCAF","myCAF","myCAF","myCAF","myCAF")
+
+integrated.NicheNet$CAF <- CAF.list
+q <- ggplot(integrated.NicheNet, aes(x=`Ligand`, y=`colSums(Ligand_EMT_target)`, fill=`CAF`,color = `CAF`)) +
+  geom_bar(stat="identity",size=1.25)+
+  scale_fill_manual(values = c("#E62222","#377EB8"))+
+  scale_color_manual(values = c("#B71515","#2B6391"))+
+  #geom_jitter(width = 0.2, size = 3) +
+  #scale_color_prism("waves") +
+  #geom_violin(width=0.75, trim = TRUE, size=1.5, aes(fill=`Condition`,color=`Condition`)) + 
+  #scale_color_manual(values=c("#6C5731", "#00001A","#00001A"))+
+  #geom_dotplot(binaxis='y', stackdir='center', dotsize=.1)+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1","","#C0DCE7","#96AB99"))+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1"))+
+  #geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_dotplot()+#, position = position_jitterdodge())+
+  #geom_violin() +
+  #geom_boxplot() +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.08)) +
+  #guides(y = "prism_offset_minor") + 
+  theme_classic(base_size = 25) + 
+  scale_x_discrete(limit = c("IGF1","IL6","NAMPT","TNFSF10","IGF2","PROS1","FGF9","AREG","PDGFD","MDK","CCL2","PDGFC","HBEGF","CXCL12","GAS6","FGF7","NRG1","CXCL2","C3","SCT","ANXA1"))+
+  ylab("Integrated pcEMT-M 
+       NicheNet Regulatory Potential") +
+  xlab("") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 20, hjust = 1))+
+  theme(axis.text.y = element_text(size = 20, hjust = .5))
+  #theme(legend.position = "none")# +
+  #geom_text(aes(y = 10, label = paste0("n = ", n)), data = CellClass)
+
+  #add_pvalue(p_val, label = "{p.adj}", tip.length = 0, label.size = 10)
+q
+```
+#Doing Ductal to CAF analysis for iCAF/myCAF genes
+```{r}
+
+#mygenes <- c("TGFB1","CCL2","CXCL2","CXCL12","CXCL14","IGF1","IGF2","FGF1","FGF2","FGF5","FGF7","C3","IL6","HGF", "GAS6","HBEGF","AREG","EGF","NRG1","EPGN","EREG", "INHBA", "INHBB", "MDK","PLAU")
+
+#mygenes <- c("IGF1","IGF2","IL6","FGF2","FGF7","FGF9","FGF18","FGF19", "C3","CXCL12","NAMPT","CXCL14","CCL2","CXCL2","VEGFA","PDGFA", "PDGFB","PDGFC","PDGFD", "GAS6", "PROS1", "INHBA","FAM3C","MANF","MDK","WNT5A","NRG1")
+marker_genes <- read.csv("C:/Users/karlm/OneDrive - University of Virginia/Documents/R/scRNAseq NicheNet/CAF_sub_signature.txt",sep = "")
+iCAF_genes <- filter(marker_genes, Subtype == "I")
+myCAF_genes <- filter(marker_genes, Subtype == "M")
+
+geneset_oi <- iCAF_genes$Gene
+
+geneset_oi2 <- c("AAMDC","ABI3","ACAN","ACTN3","AKT1S1","ALG6","AMOTL1","APPL1","ARHGEF2","ASCL3","ASH1L","ATP1B1","BAZ2B","BCL3","BCL6B","BDNF","BIRC3","BLCAP","BMF","BMP2K","C1QL1","CACNG3","CALCOCO1","CASKIN2","CCDC107","CCL5","CCM2L","CD40","CD69","CD70","CD86","CDC42SE1","CDK6","CHD4","CHD6","CLCN1","CLCN2","CLDN5","CLOCK","COL11A2","COL16A1","COQ8B","CREB1",'CSF1R',"CSF2RB","CTDSP1","CTDSPL2","CUEDC1","CXCL10","CXCL11","CXCL16","CXCR5","CYLD","CYP2D6","DAP3","DCLK1","DDR1","DOCK4","DSC2","E2F3","EBF1","EHF","EIF4A2","EIF4G1","EIF5A","ENO3","ERN1","FAM117A","FAM43B","FGF1","FGF12","FGF17","FLOT1","FOXS1","FTHL17","FUT7","G3BP1","GADD45B","GATA4","GDPD5","GNG4","GNGT2","GPBP1","GPM6A","GREM1","GRK5","HIVEP1","HNRNPR","HSD3B7","HSP90B1","HTR3B","ICAM1","IER3","IER5","IFNB1","IL13","IL17C","IL1RAPL1","IL27","IL6ST","ILK","ITPKC","JAK3","KANSL1L","KAT7","KCNN2","KCNT2","KLK9","KRT23","KRT36","KY","LAMA1","LINC01138","LIX1L","LRCH1","LTB","MADCAM1","MAML2","MAP3K11","MAP3K8","MAPK6","MIA","MIDEAS","MIR17HG","MITF","MLLT11","MLLT6","MMP9","MOB3C","MSC","MSX1","NDUFB9","NFAT5","NFKB2","NFKBIA","NFKBIB","NFKBID","NLK","NR2F2","NXPH4","ORAI1","PAN2","PARP8","PCBP4","PCDH10","PCDH12","PCSK2","PFN1","PLXNB1","PNKD","POU2F3","PPP1R13B","PRDM12","PRRT2","PTGES","PTHLH","PURG","RANBP10","RAP2C","RASGRP4","RASSF2","RBMS1","REL","RELB","RFX5","RIN2","RND1","RNF43","RPS19","RPS6KA4","RRAS","RRP8","RSF1","S1PR2","SDC4","SEC63","SH2B3","SIN3A","SIRT2","SIX4","SIX5","SLAMF8","SLC12A2","SLC16A6","SLC44A1","SLC6A12","SMOC1","SMPD3","SOX10","SOX3","SOX5","SP6","STAT6","STX19","STX4","SUCO","TATDN1","TBC1D17","TCEA2","TFE3","TIAL1","TJAP1","TLX1","TLX3","TNFRSF1B","TNFRSF9","TNFSF15","TNFSF18","TNIP1","TP53","TP63","TRAF4","TRIB2","TRIM47","TRPC4","TSEN54","TSLP","TSNAXIP1","TSPEAR","TUT1","UACA","UBD","UBE2D3","UBE2H","UBE2I","UPF2","VEZF1","WNT10A","WNT10B","WNT4","WRAP53","WRN","YWHAQ","YWHAZ","YY1AP1","ZDHHC24","ZDHHC8","ZEB1","ZFHX3","ZIC4","ZMYND15")
+#geneset_oi <- c("ADAM12","ADAMTS12","ADAMTS2","AEBP1","ANGPTL2","ANTXR1","AXL","BNC2","CALD1","CDH2","CMTM3","CNRIP1","COL10A1","COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1","COL6A2","COL6A3","COL8A1","DACT1","EMP3","FAP","FBN1","FN1","FSTL1","GPC6","GYPC","HTRA1","ITGA11","LOXL2","MMP2","MSRB3","NAP1L3","NID2","OLFML2B","PCOLCE","PDGFRB","PMP22","POSTN","SPARC","THBS2","VCAN","VIM","ZEB2","SNAI1","SNAI2","TWIST1")
+
+#new geneset
+mygenes <- c("TIMP1", "NRG1","GRN","APP", "HLA-E","INHBA","MIF","CXCL2","TNF","C3","TNFSF13B","GAS6","HBEGF","FAM3C","FGF19","PROS1","IL6","MDK","FGF7","TNFSF12","CXCL12","COPA","SPP1")
+
+ligand_target_df <- as.data.frame(ligand_target_matrix)
+
+EMT_targets <- na.omit(ligand_target_df[geneset_oi2,])
+
+Ligand_EMT_target <- EMT_targets[, mygenes]
+
+newDF <- Ligand_EMT_target[head(order(sapply(Ligand_EMT_target, var), decreasing = TRUE), 50),]
+
+mygenes[!mygenes %in% names(EMT_targets)]
+## [1] "d"
+
+dt2 <- Ligand_EMT_target %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname)
+head(dt2)
+
+dt2 <- newDF %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname)
+head(dt2)
+
+hm <- ggplot(dt2, aes(x = rowname, y = colname, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "white",high = "darkred", space = "Lab",
+  name="Predicted Regulatory
+Potential")+#,limit = c(0.00018,.0085), midpoint = .00065,)+
+  theme_minimal()+# minimal theme
+  #theme_cowplot()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 5, hjust = 1))+
+  theme(axis.text.y = element_text(size = 5, hjust = 1))+
+  scale_y_discrete(limits=mygenes)+
+  ylab("Cancer cell-secreted ligands") +
+  xlab("iCAF genes") +
+  coord_fixed()+
+  theme(aspect.ratio = .4)
+hm
+
+
+hm
+
+Ligand_EMT_target_matrix <- as.matrix(Ligand_EMT_target)
+
+heatmap(Ligand_EMT_target_matrix, Rowv =NULL, Colv=NA, col = heat.colors(256))#, margins = c(5,10))
+
+pheatmap(Ligand_EMT_target_matrix, display_numbers =F)
+
+Sums <- colSums(Ligand_EMT_target)
+
+mygenesums <- data.frame(mygenes,Sums)
+
+```
+```{r}
+library(tidyverse)  
+library(ggplot2)
+library(ggprism)
+library(ggsignif)
+#library(ggstatsplot)
+library(dplyr)
+library(plyr)
+
+integrated.NicheNet <- as.data.frame(colSums(Ligand_EMT_target))
+integrated.NicheNet$Ligand <- rownames(integrated.NicheNet)
+CAF.list <- c("iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF")
+
+integrated.NicheNet$CAF <- CAF.list
+
+q <- ggplot(integrated.NicheNet, aes(x=`Ligand`, y=`colSums(Ligand_EMT_target)`, fill=`CAF`,color = `CAF`)) +
+  geom_bar(stat="identity",size=1.25)+
+  scale_fill_manual(values = c("#DF8F44","#DF8F44"))+
+  scale_color_manual(values = c("black","black"))+
+  #geom_jitter(width = 0.2, size = 3) +
+  #scale_color_prism("waves") +
+  #geom_violin(width=0.75, trim = TRUE, size=1.5, aes(fill=`Condition`,color=`Condition`)) + 
+  #scale_color_manual(values=c("#6C5731", "#00001A","#00001A"))+
+  #geom_dotplot(binaxis='y', stackdir='center', dotsize=.1)+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1","","#C0DCE7","#96AB99"))+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1"))+
+  #geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_dotplot()+#, position = position_jitterdodge())+
+  #geom_violin() +
+  #geom_boxplot() +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.4)) +
+  #guides(y = "prism_offset_minor") + 
+  theme_classic(base_size = 20) + 
+  scale_x_discrete(limit = c("MIF","TNF","IL6","APP","PROS1","TNFSF12","INHBA","MDK","SPP1","TNFSF13B","GRN","HBEGF","TIMP1","FGF7","CXCL2","NRG1","GAS6","FGF19","CXCL12","C3","HLA-E","COPA","FAM3C"))+
+  ylab("Integrated NFkB Target Gene \nNicheNet Regulatory Potential") +
+  xlab("") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 20, hjust = 1, color = "black"))+
+  theme(axis.text.y = element_text(size = 20, hjust = .5, color = "black"))
+  #theme(legend.position = "none")# +
+  #geom_text(aes(y = 10, label = paste0("n = ", n)), data = CellClass)
+
+  #add_pvalue(p_val, label = "{p.adj}", tip.length = 0, label.size = 10)
+q
+```
+```{r}
+
+#mygenes <- c("TGFB1","CCL2","CXCL2","CXCL12","CXCL14","IGF1","IGF2","FGF1","FGF2","FGF5","FGF7","C3","IL6","HGF", "GAS6","HBEGF","AREG","EGF","NRG1","EPGN","EREG", "INHBA", "INHBB", "MDK","PLAU")
+
+#mygenes <- c("IGF1","IGF2","IL6","FGF2","FGF7","FGF9","FGF18","FGF19", "C3","CXCL12","NAMPT","CXCL14","CCL2","CXCL2","VEGFA","PDGFA", "PDGFB","PDGFC","PDGFD", "GAS6", "PROS1", "INHBA","FAM3C","MANF","MDK","WNT5A","NRG1")
+marker_genes <- read.csv("C:/Users/karlm/OneDrive - University of Virginia/Documents/R/scRNAseq NicheNet/CAF_sub_signature.txt",sep = "")
+iCAF_genes <- filter(marker_genes, Subtype == "I")
+myCAF_genes <- filter(marker_genes, Subtype == "M")
+
+geneset_oi <- myCAF_genes$Gene
+#geneset_oi <- c("ADAM12","ADAMTS12","ADAMTS2","AEBP1","ANGPTL2","ANTXR1","AXL","BNC2","CALD1","CDH2","CMTM3","CNRIP1","COL10A1","COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1","COL6A2","COL6A3","COL8A1","DACT1","EMP3","FAP","FBN1","FN1","FSTL1","GPC6","GYPC","HTRA1","ITGA11","LOXL2","MMP2","MSRB3","NAP1L3","NID2","OLFML2B","PCOLCE","PDGFRB","PMP22","POSTN","SPARC","THBS2","VCAN","VIM","ZEB2","SNAI1","SNAI2","TWIST1")
+
+#new geneset
+mygenes <- c("TIMP1", "TFF1", "NRG1","GRN","APP", "HLA-E","INHBA","MIF","CXCL2","TNF","C3","TNFSF13B","GAS6","HBEGF","FAM3C","FGF19","PROS1","IL6","MDK","FGF7","TNFSF12","CXCL12","COPA","APP","SPP1")
+
+ligand_target_df <- as.data.frame(ligand_target_matrix)
+
+EMT_targets <- na.omit(ligand_target_df[geneset_oi,])
+
+Ligand_EMT_target <- EMT_targets[, mygenes]
+
+mygenes[!mygenes %in% names(EMT_targets)]
+## [1] "d"
+
+dt2 <- Ligand_EMT_target %>%
+  rownames_to_column() %>%
+  gather(colname, value, -rowname)
+head(dt2)
+
+hm <- ggplot(dt2, aes(x = rowname, y = colname, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "white",high = "darkred", space = "Lab",
+  name="Predicted Regulatory
+Potential")+#,limit = c(0.00018,.0085), midpoint = .00065,)+
+  theme_minimal()+# minimal theme
+  #theme_cowplot()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 5, hjust = 1))+
+  theme(axis.text.y = element_text(size = 5, hjust = 1))+
+  scale_y_discrete(limits=mygenes)+
+  ylab("Cancer cell-secreted ligands") +
+  xlab("iCAF genes") +
+  coord_fixed()+
+  theme(aspect.ratio = .4)
+hm
+
+
+hm
+
+Ligand_EMT_target_matrix <- as.matrix(Ligand_EMT_target)
+
+heatmap(Ligand_EMT_target_matrix, Rowv =NULL, Colv=NA, col = heat.colors(256))#, margins = c(5,10))
+
+pheatmap(Ligand_EMT_target_matrix, display_numbers =F)
+
+Sums <- colSums(Ligand_EMT_target)
+
+mygenesums <- data.frame(mygenes,Sums)
+
+```
+```{r}
+library(tidyverse)  
+library(ggplot2)
+library(ggprism)
+library(ggsignif)
+#library(ggstatsplot)
+library(dplyr)
+library(plyr)
+
+integrated.NicheNet <- as.data.frame(colSums(Ligand_EMT_target))
+integrated.NicheNet$Ligand <- rownames(integrated.NicheNet)
+CAF.list <- c("iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF","iCAF")
+
+integrated.NicheNet$CAF <- CAF.list
+
+q <- ggplot(integrated.NicheNet, aes(x=`Ligand`, y=`colSums(Ligand_EMT_target)`, fill=`CAF`,color = `CAF`)) +
+  geom_bar(stat="identity",size=1.25)+
+  scale_fill_manual(values = c("#00A1D5","#00A1D5"))+
+  scale_color_manual(values = c("black","black"))+
+  #geom_jitter(width = 0.2, size = 3) +
+  #scale_color_prism("waves") +
+  #geom_violin(width=0.75, trim = TRUE, size=1.5, aes(fill=`Condition`,color=`Condition`)) + 
+  #scale_color_manual(values=c("#6C5731", "#00001A","#00001A"))+
+  #geom_dotplot(binaxis='y', stackdir='center', dotsize=.1)+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1","","#C0DCE7","#96AB99"))+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1"))+
+  #geom_boxplot(fill = "white", width = 0.07) + 
+  #geom_dotplot()+#, position = position_jitterdodge())+
+  #geom_violin() +
+  #geom_boxplot() +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.08)) +
+  #guides(y = "prism_offset_minor") + 
+  theme_classic(base_size = 25) + 
+  scale_x_discrete(limit = c("APP","APP.1","TFF1","TNF","IL6","PROS1","INHBA","TNFSF12","SPP1","MIF","GRN","MDK","HBEGF","TIMP1","FGF19","TNFSF13B","FGF7","GAS6","CXCL2","NRG1","CXCL12","C3","HLA-E","COPA","FAM3C"))+
+  ylab("Integrated myCAF Marker gene 
+       NicheNet Regulatory Potential") +
+  xlab("") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 20, hjust = 1, color = "black"))+
+  theme(axis.text.y = element_text(size = 20, hjust = .5, color = "black"))
+  #theme(legend.position = "none")# +
+  #geom_text(aes(y = 10, label = paste0("n = ", n)), data = CellClass)
+
+  #add_pvalue(p_val, label = "{p.adj}", tip.length = 0, label.size = 10)
+q
+```
+```{r}
+
+```
+
+
+
+
+
