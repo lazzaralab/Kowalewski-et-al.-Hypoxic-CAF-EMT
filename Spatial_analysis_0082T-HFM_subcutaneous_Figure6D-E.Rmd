@@ -1,0 +1,801 @@
+---
+title: "HPAF-0082T-HFM spatial analysis"
+output: html_notebook
+---
+
+
+
+```{r}
+library(ggplot2)
+library(ggprism)
+library(ggsignif)
+library(geomtextpath)
+#library(ggstatsplot)
+library(dplyr)
+library(plyr)
+library(ggsci)
+library(ggpubr)
+library(readxl)
+library("cowplot")
+library(fields)
+
+```
+```{r}
+df <- read_excel("C:/Users/karlm/Desktop/2023-12-19-HPAF-0082T-HFM-Comb.xlsx")
+df$Sample <- as.character(df$Sample)
+df$ImageNumber <- as.character(df$ImageNumber)
+#Each sample has paired secondary only controls
+
+k <- ggplot(df, aes(x=Intensity_MeanIntensity_GFP_RD1, fill = `Sample`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = Sample), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  #geom_vline(xintercept = .2, color="red")+
+  theme_classic()
+k
+
+```
+#Channel names: GFP_RD1 = Hyp, RFP_RD1=Vim, CY5_RD1=GFP, GFP_RD2=Ecad, CY5_RD2=RFP, RFP_RD3=COXIV
+
+#Mouse3 analysis
+```{r}
+M3 <- filter(df, Sample == "3")
+
+
+h <- ggplot(M3, aes(x=Intensity_MeanIntensity_GFP_RD1, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .3, color="red")+
+  #theme_prism()+
+  ggtitle("Hypoxyprobe")
+h
+
+c <- ggplot(M3, aes(x=Intensity_MeanIntensity_RFP_RD3, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .2, color="red")+
+  #theme_prism()+
+  ggtitle("COXIV")
+c
+
+v <- ggplot(M3, aes(x=Intensity_MeanIntensity_RFP_RD1, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .25, color="red")+
+  #theme_prism()+
+  ggtitle("Vimentin")
+v
+
+r <- ggplot(M3, aes(x=Intensity_MeanIntensity_CY5_RD2, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .18, color="red")+
+  #theme_prism()+
+  ggtitle("RFP")
+r
+
+g <- ggplot(M3, aes(x=Intensity_MeanIntensity_CY5_RD1, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  #ylim(0,100)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .1, color="red")+
+  #theme_prism()+
+  ggtitle("GFP")
+g
+#Image 2 = Secondary only control
+```
+#Cell classification for mouse 3
+```{r}
+#Cancer cells
+CC3 <- filter(M3, Intensity_MeanIntensity_RFP_RD3>=.2 & Intensity_MeanIntensity_CY5_RD2<.2 & Intensity_MeanIntensity_CY5_RD1<.1)
+
+Vim_CC <- filter(CC3, Intensity_MeanIntensity_RFP_RD1>=0.25)
+Vim_CC$CellType <- "Vim+ CC"
+
+Vim_n_CC <- filter(CC3, Intensity_MeanIntensity_RFP_RD1<.25)
+Vim_n_CC$CellType <- "Vim- CC"
+
+CC_comb <- rbind(Vim_CC,Vim_n_CC)
+
+CAF3 <- filter(M3, Intensity_MeanIntensity_RFP_RD1>=0.25 & Intensity_MeanIntensity_RFP_RD3<.2)
+
+#Never Hypoxic 
+NevHYP <- filter(CAF3, Intensity_MeanIntensity_CY5_RD2 >=0.1 & Intensity_MeanIntensity_GFP_RD1<.25)
+NevHYP$CellType <- "n-Hyp CAF"
+
+#Currently hypoxic CAFs
+HYPr <- filter(CAF3, Intensity_MeanIntensity_CY5_RD2>=0.1 & Intensity_MeanIntensity_GFP_RD1>=.25)
+HYPr$CellType <- "Hyp CAF"
+HYPg <- filter(CAF3, Intensity_MeanIntensity_CY5_RD1>=0.1 & Intensity_MeanIntensity_GFP_RD1>=.25)
+HYPg$CellType <- "Hyp CAF"
+
+HYP_CAF <- rbind(HYPr, HYPg)
+#GFP positive once hypoxic CAFs
+OnHYP <- filter(CAF3, Intensity_MeanIntensity_CY5_RD1 >=0.08 & Intensity_MeanIntensity_GFP_RD1 <.25)
+OnHYP$CellType <- "o-Hyp CAF"
+
+
+m3_comb <- rbind(Vim_CC,Vim_n_CC,NevHYP,HYPr,HYPg,OnHYP)
+
+im7 <- filter(m3_comb, ImageNumber=="7")
+
+#Make sure to have y values be negative to match actual images
+im7$Location_Center_Y <- -im7$Location_Center_Y
+
+val <- ggplot(im7, aes(x=Location_Center_X, y=Location_Center_Y, color=CellType))+
+  geom_point(size=3)+
+  scale_color_jama()+
+  theme_classic(base_size = 24)
+val
+```
+#Spatial binning for Mouse 3 image 1
+```{r}
+library(fields)
+
+HYP_CAF1 <- filter(HYP_CAF, ImageNumber == "1")
+NevHYP_CAF1 <- filter(NevHYP, ImageNumber == "3")
+OnHYP_CAF1 <- filter(OnHYP, ImageNumber == "3")
+
+CC1 <- filter(CC_comb, ImageNumber == "3")
+Vim_CC1 <- filter(Vim_CC, ImageNumber == "3")
+Vim_n_CC1 <- filter(Vim_n_CC, ImageNumber == "3")
+
+#Getting coordinates for all cells
+
+Vimpos_CC <- as.matrix(Vim_CC1[,2:3])
+Vimneg_CC <- as.matrix(Vim_n_CC1[,2:3])
+total_CC <- as.matrix(CC1[,2:3])
+
+NevHYP_mat <- as.matrix(NevHYP_CAF1[,2:3])
+
+HYP_mat <- as.matrix(HYP_CAF1[,2:3])
+
+OnHYP_mat <- as.matrix(OnHYP_CAF1[,2:3])
+
+
+#Calc distances
+NevHYP_totalCC <- rdist(total_CC, NevHYP_mat)
+
+HYP_totalCC <- rdist(total_CC, HYP_mat)
+
+OnHYP_totalCC <- rdist(total_CC, OnHYP_mat)
+
+
+NevHYP_int <- rowSums(NevHYP_totalCC< 100)
+HYP_int <- rowSums(HYP_totalCC< 100)
+onHYP_int <- rowSums(OnHYP_totalCC< 100)
+
+CC_interact <- cbind(CC1,NevHYP_int,HYP_int,onHYP_int)
+CC_interact$frac_NevHYP <- CC_interact$NevHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_HYP <- CC_interact$HYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_once_HYP <- CC_interact$onHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+Nev_Int <- filter(CC_interact, frac_NevHYP >=0.5)
+Nev_vim_f <- nrow(filter(Nev_Int, CellType =="Vim+ CC"))/nrow(Nev_Int)
+
+Hyp_Int <- filter(CC_interact, frac_HYP >= 0.5)
+Hyp_vim_f <- nrow(filter(Hyp_Int, CellType =="Vim+ CC"))/nrow(Hyp_Int)
+
+onHyp_Int <- filter(CC_interact, frac_once_HYP >= 0.5)
+onHyp_vim_f <- nrow(filter(onHyp_Int, CellType =="Vim+ CC"))/nrow(onHyp_Int)
+
+None2 <- filter(CC_interact, NevHYP_int < 1)
+None <- filter(None2, HYP_int ==0 & onHYP_int == 0)
+None_vim_f <- nrow(filter(None, CellType =="Vim+ CC"))/nrow(None)
+```
+
+```{r}
+df <- as.data.frame(tibble::tribble(
+  ~Condition, ~Vim,
+  "HYP-", 1,
+  "HYP-", 1,
+  "HYP-", 1,
+  #"HYP-", 1,
+  "HYP+", 2.1,
+  "HYP+", 1.68,
+  "HYP+", 1.04,
+  #"HYP+", .94,
+  "GFP+/HYP-", .98,
+  "GFP+/HYP-", 1.08 ,
+  "GFP+/HYP-", 1,
+  #"GFP+/HYP-", 1.1,
+  ))
+
+res.aov <- aov(Vim ~ Condition, data = df)
+# Summary of the analysis
+summary(res.aov)
+TukeyHSD(res.aov)
+
+Q <- ggplot(df, aes(x = Condition, y= `Vim`, fill=Condition, color = Condition))+
+  stat_summary(aes(y = `Vim`), fun = "mean", geom = "bar", width = 0.85, size = 1.5, color="black")+
+  scale_x_discrete(limits=c("HYP-","HYP+","GFP+/HYP-"))+
+  scale_color_manual(values=c("black","black","black","black","black"))+
+  scale_fill_manual(values=c("white","white","white","white","white"))+
+  #scale_fill_manual(values=c("#B7BEC8","#AAEEFF","#FFAAAA","#87AADE","#DE8787","#B7C4C8"))+
+  #scale_color_manual(values=c("#535C6C","#00AAD4","#FF5555","#0044AA","#A02C2C","#53676C"))+
+  #scale_color_manual(values=c("#6C5731", "#31545D","#2F5596"))+
+  stat_summary(fun.data="mean_se", geom="errorbar",  size=2, width=0)+
+  geom_jitter(width = .2, size = 5, stroke = 1)+
+  scale_color_jama()+
+  #scale_color_prism("waves") + 
+  #scale_fill_prism("waves") + 
+  guides(y = "prism_offset_minor") + 
+  theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme(legend.position = "none") +
+  ylab("Fold Change in Vimentin+") +
+  xlab("") +
+  scale_y_continuous(limits = c(0, 2.5), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))
+Q
+```
+#New samples
+```{r}
+COXIV<- read.csv("D:/KMK Data/2024-01-11-HPAF-0082T-HFM-ms2-ms3/CellProfiler/2024-01-12-HPAF-0082T-HFM-ImageAnalysis_COXIV.csv")
+VIM <- read.csv("D:/KMK Data/2024-01-11-HPAF-0082T-HFM-ms2-ms3/CellProfiler/2024-01-12-HPAF-0082T-HFM-ImageAnalysis_VIM.csv")
+```
+
+```{r}
+#df$Sample <- as.character(df$Sample)
+COXIV$ImageNumber <- as.character(COXIV$ImageNumber)
+#Each sample has paired secondary only controls
+
+k <- ggplot(COXIV, aes(x=Intensity_MeanIntensity_GFP_RD2, fill = `ImageNumber`))+
+  geom_density(alpha = 0.5)+
+  #xlim(0.,5000)+
+  geom_textdensity(aes(label = ImageNumber), 
+                   hjust = "ymax", 
+                   vjust = -0.5, text_only = TRUE, text_smoothing = 20)+
+  geom_vline(xintercept = .1, color="red")#+
+  #theme_prism()
+k
+
+#GFP_RD1 = Hypoxyprobe = 0.32 cutoff
+#RFP_RD1 = Vimentin = 0.15 cutoff
+#RFP_RD3 = COXIV = 0.15 cutoff
+#CY5_RD1 = GFP = 0.05 cutoff
+#CY5_RD2 = RFP = 0.105 cutoff
+#GFP_RD2 = PDPN = 0.25 cutoff
+```
+
+
+#Analysis for Tumor 2
+```{r}
+#Cancer cells identification
+M2 <- filter(COXIV, ImageNumber == "2")
+CC2 <- filter(M2, Intensity_MeanIntensity_RFP_RD3>=0.15 & Intensity_MeanIntensity_CY5_RD2< 0.105 & Intensity_MeanIntensity_CY5_RD1< 0.05 & Intensity_MeanIntensity_GFP_RD2 < 0.2)
+
+Vim_CC <- filter(CC2, Intensity_MeanIntensity_RFP_RD1>=0.075)
+Vim_CC$CellType <- "Vim+ CC"
+
+Vim_n_CC <- filter(CC2, Intensity_MeanIntensity_RFP_RD1<0.075)
+Vim_n_CC$CellType <- "Vim- CC"
+
+CC_comb <- rbind(Vim_CC,Vim_n_CC)
+
+CAF2 <- filter(M2, Intensity_MeanIntensity_RFP_RD1>= 0.075 & Intensity_MeanIntensity_RFP_RD3 < 0.15)
+
+#Never Hypoxic 
+NevHYP <- filter(CAF2, Intensity_MeanIntensity_CY5_RD2 >= 0.105 & Intensity_MeanIntensity_GFP_RD1 < 0.32)
+NevHYP$CellType <- "n-Hyp CAF"
+
+#Currently hypoxic CAFs
+HYPr <- filter(CAF2, Intensity_MeanIntensity_CY5_RD2 >= 0.105 & Intensity_MeanIntensity_GFP_RD1 >= 0.32)
+HYPr$CellType <- "Hyp CAF"
+HYPg <- filter(CAF2, Intensity_MeanIntensity_CY5_RD1>=0.05 & Intensity_MeanIntensity_GFP_RD1>= 0.28)
+HYPg$CellType <- "Hyp CAF"
+
+HYP_CAF <- rbind(HYPr, HYPg)
+#GFP positive once hypoxic CAFs
+OnHYP <- filter(CAF2, Intensity_MeanIntensity_CY5_RD1 >= 0.05 & Intensity_MeanIntensity_GFP_RD1 <0.28)
+OnHYP$CellType <- "o-Hyp CAF"
+
+
+m2_comb <- rbind(Vim_CC,Vim_n_CC,NevHYP,HYPr,HYPg,OnHYP)
+
+im2 <- filter(m2_comb, ImageNumber=="2")
+
+#Make sure to have y values be negative to match actual images
+im2$Location_Center_Y <- -im2$Location_Center_Y
+
+val <- ggplot(im2, aes(x=Location_Center_X, y=Location_Center_Y, color=CellType))+
+  geom_point(size=2)+
+  scale_color_jama()+
+  theme_classic(base_size = 24)
+val
+```
+#Spatial binning of tumor 2
+```{r}
+library(fields)
+
+HYP_CAF2 <- filter(HYP_CAF, ImageNumber == "2")
+NevHYP_CAF2 <- filter(NevHYP, ImageNumber == "2")
+OnHYP_CAF2 <- filter(OnHYP, ImageNumber == "2")
+
+CC2 <- filter(CC_comb, ImageNumber == "2")
+Vim_CC2 <- filter(Vim_CC, ImageNumber == "2")
+Vim_n_CC2 <- filter(Vim_n_CC, ImageNumber == "2")
+
+#Getting coordinates for all cells
+
+Vimpos_CC <- as.matrix(Vim_CC2[,2:3])
+Vimneg_CC <- as.matrix(Vim_n_CC2[,2:3])
+total_CC <- as.matrix(CC2[,2:3])
+
+NevHYP_mat <- as.matrix(NevHYP_CAF2[,2:3])
+
+HYP_mat <- as.matrix(HYP_CAF2[,2:3])
+
+OnHYP_mat <- as.matrix(OnHYP_CAF2[,2:3])
+
+
+#Calc distances
+NevHYP_totalCC <- rdist(total_CC, NevHYP_mat)
+
+HYP_totalCC <- rdist(total_CC, HYP_mat)
+
+OnHYP_totalCC <- rdist(total_CC, OnHYP_mat)
+
+
+NevHYP_int <- rowSums(NevHYP_totalCC< 83.33)
+HYP_int <- rowSums(HYP_totalCC< 83.33)
+onHYP_int <- rowSums(OnHYP_totalCC< 83.33)
+
+CC_interact <- cbind(CC2,NevHYP_int,HYP_int,onHYP_int)
+
+CC_interact$frac_NevHYP <- CC_interact$NevHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_HYP <- CC_interact$HYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_once_HYP <- CC_interact$onHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+Nev_Int <- filter(CC_interact, frac_NevHYP >= .66)
+Nev_vim_f <- nrow(filter(Nev_Int, CellType =="Vim+ CC"))/nrow(Nev_Int)
+
+Hyp_Int <- filter(CC_interact, frac_HYP >= .66)
+Hyp_vim_f <- nrow(filter(Hyp_Int, CellType =="Vim+ CC"))/nrow(Hyp_Int)
+
+onHyp_Int <- filter(CC_interact, frac_once_HYP >= .66)
+onHyp_vim_f <- nrow(filter(onHyp_Int, CellType =="Vim+ CC"))/nrow(onHyp_Int)
+
+None2 <- filter(CC_interact, NevHYP_int == 0 & HYP_int ==0 & onHYP_int == 0)
+None <- filter(None2, HYP_int ==0 & onHYP_int == 0)
+None_vim_f <- nrow(filter(None, CellType =="Vim+ CC"))/nrow(None)
+```
+```{r}
+df <- as.data.frame(tibble::tribble(
+  ~Condition, ~Vim,
+  "HYP-", .14,
+  #"HYP-", 1,
+  #"HYP-", 1,
+  #"HYP-", 1,
+  "HYP+", .17,
+  #"HYP+", 1.68,
+  #"HYP+", 1.04,
+  #"HYP+", .94,
+  "GFP+/HYP-", .125,
+  #"GFP+/HYP-", 1.08 ,
+  #"GFP+/HYP-", 1,
+  #"GFP+/HYP-", 1.1,
+  ))
+
+res.aov <- aov(Vim ~ Condition, data = df)
+# Summary of the analysis
+summary(res.aov)
+TukeyHSD(res.aov)
+
+Q <- ggplot(df, aes(x = Condition, y= `Vim`, fill=Condition, color = Condition))+
+  stat_summary(aes(y = `Vim`), fun = "mean", geom = "bar", width = 0.85, size = 1.5, color="black")+
+  scale_x_discrete(limits=c("HYP-","HYP+","GFP+/HYP-"))+
+  scale_color_manual(values=c("black","black","black","black","black"))+
+  scale_fill_manual(values=c("white","white","white","white","white"))+
+  #scale_fill_manual(values=c("#B7BEC8","#AAEEFF","#FFAAAA","#87AADE","#DE8787","#B7C4C8"))+
+  #scale_color_manual(values=c("#535C6C","#00AAD4","#FF5555","#0044AA","#A02C2C","#53676C"))+
+  #scale_color_manual(values=c("#6C5731", "#31545D","#2F5596"))+
+  stat_summary(fun.data="mean_se", geom="errorbar",  size=2, width=0)+
+  geom_jitter(width = .2, size = 5, stroke = 1)+
+  scale_color_jama()+
+  theme_classic(base_size = 24) + 
+  ylab("Fraction Vimentin+") +
+  xlab("") +
+  #scale_y_continuous(limits = c(0, 2.5), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))
+Q
+```
+#Tumor 1
+
+```{r}
+#Cancer cells identification
+M1 <- filter(COXIV, ImageNumber == "1")
+CC1 <- filter(M1, Intensity_MeanIntensity_RFP_RD3 >= 0.13 & Intensity_MeanIntensity_CY5_RD2 < 0.105 , Intensity_MeanIntensity_CY5_RD1 < .15 & Intensity_MeanIntensity_GFP_RD2 < .2)
+
+Vim_CC <- filter(CC1, Intensity_MeanIntensity_RFP_RD1 >= .085)
+Vim_CC$CellType <- "Vim+ CC"
+
+Vim_n_CC <- filter(CC1, Intensity_MeanIntensity_RFP_RD1 < .085)
+Vim_n_CC$CellType <- "Vim- CC"
+
+CC_comb <- rbind(Vim_CC, Vim_n_CC)
+
+CAF1 <- filter(M1, Intensity_MeanIntensity_RFP_RD1 >= .085 & Intensity_MeanIntensity_RFP_RD3 < 0.13)
+
+#Never Hypoxic 
+NevHYP <- filter(CAF1, Intensity_MeanIntensity_CY5_RD2 >= .15 & Intensity_MeanIntensity_GFP_RD1 < .16)
+NevHYP$CellType <- "n-Hyp CAF"
+
+#Currently hypoxic CAFs
+HYPr <- filter(CAF1, Intensity_MeanIntensity_CY5_RD2 >= .15 & Intensity_MeanIntensity_GFP_RD1 >= .16)
+HYPr$CellType <- "Hyp CAF"
+HYPg <- filter(CAF1, Intensity_MeanIntensity_CY5_RD1>= .12 & Intensity_MeanIntensity_GFP_RD1>= .16)
+HYPg$CellType <- "Hyp CAF"
+
+HYP_CAF <- rbind(HYPr, HYPg)
+#GFP positive once hypoxic CAFs
+OnHYP <- filter(CAF1, Intensity_MeanIntensity_CY5_RD1 >= .12 & Intensity_MeanIntensity_GFP_RD1 < .16)
+OnHYP$CellType <- "o-Hyp CAF"
+
+
+m1_comb <- rbind(Vim_CC,Vim_n_CC,NevHYP,HYPr,HYPg,OnHYP)
+
+im1 <- filter(m1_comb, ImageNumber=="1")
+
+#Make sure to have y values be negative to match actual images
+im1$Location_Center_Y <- -im1$Location_Center_Y
+
+val <- ggplot(im1, aes(x=Location_Center_X, y=Location_Center_Y, color=CellType))+
+  geom_point(size=1)+
+  scale_color_jama()+
+  theme_classic(base_size = 24)
+val
+```
+```{r}
+HYP_CAF1 <- filter(HYP_CAF, ImageNumber == "1")
+NevHYP_CAF1 <- filter(NevHYP, ImageNumber == "1")
+OnHYP_CAF1 <- filter(OnHYP, ImageNumber == "1")
+
+CC1 <- filter(CC_comb, ImageNumber == "1")
+Vim_CC1 <- filter(Vim_CC, ImageNumber == "1")
+Vim_n_CC1 <- filter(Vim_n_CC, ImageNumber == "1")
+
+#Getting coordinates for all cells
+
+Vimpos_CC <- as.matrix(Vim_CC1[,2:3])
+Vimneg_CC <- as.matrix(Vim_n_CC1[,2:3])
+total_CC <- as.matrix(CC1[,2:3])
+
+NevHYP_mat <- as.matrix(NevHYP_CAF1[,2:3])
+
+HYP_mat <- as.matrix(HYP_CAF1[,2:3])
+
+OnHYP_mat <- as.matrix(OnHYP_CAF1[,2:3])
+
+
+#Calc distances
+NevHYP_totalCC <- rdist(total_CC, NevHYP_mat)
+
+HYP_totalCC <- rdist(total_CC, HYP_mat)
+
+OnHYP_totalCC <- rdist(total_CC, OnHYP_mat)
+
+
+NevHYP_int <- rowSums(NevHYP_totalCC< 83.33)
+HYP_int <- rowSums(HYP_totalCC< 83.33)
+onHYP_int <- rowSums(OnHYP_totalCC< 83.33)
+
+CC_interact <- cbind(CC1,NevHYP_int,HYP_int,onHYP_int)
+CC_interact$frac_NevHYP <- CC_interact$NevHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_HYP <- CC_interact$HYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_once_HYP <- CC_interact$onHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+Nev_Int <- filter(CC_interact, frac_NevHYP >= .66)
+Nev_vim_f <- nrow(filter(Nev_Int, CellType =="Vim+ CC"))/nrow(Nev_Int)
+
+Hyp_Int <- filter(CC_interact, frac_HYP >= .66)
+Hyp_vim_f <- nrow(filter(Hyp_Int, CellType =="Vim+ CC"))/nrow(Hyp_Int)
+
+onHyp_Int <- filter(CC_interact, frac_once_HYP >= .66)
+onHyp_vim_f <- nrow(filter(onHyp_Int, CellType =="Vim+ CC"))/nrow(onHyp_Int)
+
+None1 <- filter(CC_interact, NevHYP_int == 0 & HYP_int ==0 & onHYP_int == 0)
+None <- filter(None1, HYP_int ==0 & onHYP_int == 0)
+None_vim_f <- nrow(filter(None, CellType =="Vim+ CC"))/nrow(None)
+
+
+#Near Hyp, .199
+#Near n-Hyp, .16989
+#Near o-Hyp, .111
+#Near no CAF, .206
+```
+
+#Tumor 3
+```{r}
+
+#Cancer cells identification
+M3 <- filter(COXIV, ImageNumber == "3")
+CC3 <- filter(M3, Intensity_MeanIntensity_RFP_RD3 >= 0.13 & Intensity_MeanIntensity_CY5_RD2 < 0.105 , Intensity_MeanIntensity_CY5_RD1 < .15 & Intensity_MeanIntensity_GFP_RD2 < .2)
+
+Vim_CC <- filter(CC3, Intensity_MeanIntensity_RFP_RD1 >= .1)
+Vim_CC$CellType <- "Vim+ CC"
+
+Vim_n_CC <- filter(CC3, Intensity_MeanIntensity_RFP_RD1 < .1)
+Vim_n_CC$CellType <- "Vim- CC"
+
+CC_comb <- rbind(Vim_CC, Vim_n_CC)
+
+CAF3 <- filter(M3, Intensity_MeanIntensity_RFP_RD1 >= .1 & Intensity_MeanIntensity_RFP_RD3 < 0.13)
+
+#Never Hypoxic 
+NevHYP <- filter(CAF3, Intensity_MeanIntensity_CY5_RD2 >= .1 & Intensity_MeanIntensity_GFP_RD1 < .25)
+NevHYP$CellType <- "n-Hyp CAF"
+
+#Currently hypoxic CAFs
+HYPr <- filter(CAF3, Intensity_MeanIntensity_CY5_RD2 >= .1 & Intensity_MeanIntensity_GFP_RD1 >= .25)
+HYPr$CellType <- "Hyp CAF"
+HYPg <- filter(CAF3, Intensity_MeanIntensity_CY5_RD1>= .1 & Intensity_MeanIntensity_GFP_RD1>= .25)
+HYPg$CellType <- "Hyp CAF"
+
+HYP_CAF <- rbind(HYPr, HYPg)
+#GFP positive once hypoxic CAFs
+OnHYP <- filter(CAF3, Intensity_MeanIntensity_CY5_RD1 >= .1 & Intensity_MeanIntensity_GFP_RD1 < .25)
+OnHYP$CellType <- "o-Hyp CAF"
+
+
+m3_comb <- rbind(Vim_CC,Vim_n_CC,NevHYP,HYPr,HYPg,OnHYP)
+
+im3 <- filter(m3_comb, ImageNumber=="3")
+
+#Make sure to have y values be negative to match actual images
+im3$Location_Center_Y <- -im3$Location_Center_Y
+
+val <- ggplot(im3, aes(x=Location_Center_X, y=Location_Center_Y, color=CellType))+
+  geom_point(size=1)+
+  scale_color_jama()+
+  theme_classic(base_size = 24)
+val
+```
+```{r}
+HYP_CAF3 <- filter(HYP_CAF, ImageNumber == "3")
+NevHYP_CAF3 <- filter(NevHYP, ImageNumber == "3")
+OnHYP_CAF3 <- filter(OnHYP, ImageNumber == "3")
+
+CC3 <- filter(CC_comb, ImageNumber == "3")
+Vim_CC3 <- filter(Vim_CC, ImageNumber == "3")
+Vim_n_CC3 <- filter(Vim_n_CC, ImageNumber == "3")
+
+#Getting coordinates for all cells
+
+Vimpos_CC <- as.matrix(Vim_CC3[,2:3])
+Vimneg_CC <- as.matrix(Vim_n_CC3[,2:3])
+total_CC <- as.matrix(CC3[,2:3])
+
+NevHYP_mat <- as.matrix(NevHYP_CAF3[,2:3])
+
+HYP_mat <- as.matrix(HYP_CAF3[,2:3])
+
+OnHYP_mat <- as.matrix(OnHYP_CAF3[,2:3])
+
+
+#Calc distances
+NevHYP_totalCC <- rdist(total_CC, NevHYP_mat)
+
+HYP_totalCC <- rdist(total_CC, HYP_mat)
+
+OnHYP_totalCC <- rdist(total_CC, OnHYP_mat)
+
+
+NevHYP_int <- rowSums(NevHYP_totalCC< 83.33)
+HYP_int <- rowSums(HYP_totalCC< 83.33)
+onHYP_int <- rowSums(OnHYP_totalCC< 83.33)
+
+CC_interact <- cbind(CC3,NevHYP_int,HYP_int,onHYP_int)
+CC_interact$frac_NevHYP <- CC_interact$NevHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_HYP <- CC_interact$HYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+CC_interact$frac_once_HYP <- CC_interact$onHYP_int/(CC_interact$NevHYP_int+CC_interact$HYP_int+CC_interact$onHYP_int)
+
+Nev_Int <- filter(CC_interact, frac_NevHYP >= .66)
+Nev_vim_f <- nrow(filter(Nev_Int, CellType =="Vim+ CC"))/nrow(Nev_Int)
+
+Hyp_Int <- filter(CC_interact, frac_HYP >= .66)
+Hyp_vim_f <- nrow(filter(Hyp_Int, CellType =="Vim+ CC"))/nrow(Hyp_Int)
+
+onHyp_Int <- filter(CC_interact, frac_once_HYP >= .66)
+onHyp_vim_f <- nrow(filter(onHyp_Int, CellType =="Vim+ CC"))/nrow(onHyp_Int)
+
+None3 <- filter(CC_interact, NevHYP_int < 1)
+None <- filter(None3, HYP_int ==0 & onHYP_int == 0)
+None_vim_f <- nrow(filter(None, CellType =="Vim+ CC"))/nrow(None)
+
+
+#Near Hyp, .2556
+#Near n-Hyp, .157
+#Near o-Hyp, .2157
+#Near no CAF, .202
+```
+
+```{r}
+df <- as.data.frame(tibble::tribble(
+  ~Condition, ~Vim,
+  "HYP-", 1,
+  "HYP-", 1,
+  "HYP-", 1,
+  "HYP-", 1,
+  "HYP+", 1.22,
+  "HYP+", 1.16,
+  "HYP+", 1.2,
+  "HYP+", 1.28,
+  "GFP+/HYP-", 1.197,
+  "GFP+/HYP-", 1.107 ,
+  "GFP+/HYP-", .841,
+  "GFP+/HYP-", 1.087,
+  ))
+
+res.aov <- aov(Vim ~ Condition, data = df)
+# Summary of the analysis
+summary(res.aov)
+TukeyHSD(res.aov)
+
+
+Q <- ggplot(df, aes(x = Condition, y= `Vim`, fill=Condition, color = Condition))+
+  stat_summary(aes(y = `Vim`), fun = "mean", geom = "bar", width = 0.85, size = 1.5, color="black")+
+  scale_x_discrete(limits=c("HYP-","HYP+","GFP+/HYP-"))+
+  scale_color_manual(values=c("black","black","black","black","black"))+
+  scale_fill_manual(values=c("white","white","white","white","white"))+
+  #scale_fill_manual(values=c("#B7BEC8","#AAEEFF","#FFAAAA","#87AADE","#DE8787","#B7C4C8"))+
+  #scale_color_manual(values=c("#535C6C","#00AAD4","#FF5555","#0044AA","#A02C2C","#53676C"))+
+  #scale_color_manual(values=c("#6C5731", "#31545D","#2F5596"))+
+  stat_summary(fun.data="mean_se", geom="errorbar",  size=2, width=0)+
+  geom_jitter(width = .2, size = 5, stroke = 1)+
+  scale_color_jama()+
+  #scale_color_prism("waves") + 
+  #scale_fill_prism("waves") + 
+  guides(y = "prism_offset_minor") + 
+  theme_prism(base_size = 24, base_fontface = "plain") + 
+  theme(legend.position = "none") +
+  ylab("Fraction Vimentin+") +
+  xlab("") +
+  scale_y_continuous(limits = c(0, 1.75), expand = c(0,0))+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 24, hjust = 1))+
+  theme(axis.text.y = element_text(size = 24, hjust = .5))+
+  geom_signif(comparisons=list(c("HYP-","HYP+")), annotations=c("*"),
+        y_position = c(1.35), tip_length = c(0), vjust=0.4, size=1.25, textsize=11, color = "black")
+Q
+```
+#tumor 4 - not stitched
+```{r}
+COXIV<- read.csv("D:/KMK Data/2024-01-11-HPAF-0082T-HFM-ms2-ms3/CellProfiler/2024-01-12-HPAF-0082T-HFM-ImageAnalysis_tumor3_COXIV.csv")
+#COXIV$ImageNumber <- as.numeric(COXIV$ImageNumber)
+images <- c("1","2","3","4","5","7","9")
+df_filt <- filter(COXIV, ImageNumber %in% images)
+
+```
+
+```{r}
+#Cancer cells identification
+M4 <- filter(df_filt, ImageNumber %in% images)
+
+CC4 <- filter(M4, Intensity_MeanIntensity_RFP_RD3 >= 0.13 & Intensity_MeanIntensity_CY5_RD2 < 0.105 , Intensity_MeanIntensity_CY5_RD1 < .15 & Intensity_MeanIntensity_GFP_RD2 < .2)
+
+Vim_CC <- filter(CC4, Intensity_MeanIntensity_RFP_RD1 >= .1)
+Vim_CC$CellType <- "Vim+ CC"
+
+Vim_n_CC <- filter(CC4, Intensity_MeanIntensity_RFP_RD1 < .1)
+Vim_n_CC$CellType <- "Vim- CC"
+
+CC_comb <- rbind(Vim_CC, Vim_n_CC)
+
+CAF4 <- filter(M4, Intensity_MeanIntensity_RFP_RD1 >= .1 & Intensity_MeanIntensity_RFP_RD3 < 0.13)
+
+#Never Hypoxic 
+NevHYP <- filter(CAF4, Intensity_MeanIntensity_CY5_RD2 >= .17 & Intensity_MeanIntensity_GFP_RD1 < .15)
+NevHYP$CellType <- "n-Hyp CAF"
+
+#Currently hypoxic CAFs
+HYPr <- filter(CAF4, Intensity_MeanIntensity_CY5_RD2 >= .17 & Intensity_MeanIntensity_GFP_RD1 >= .15)
+HYPr$CellType <- "Hyp CAF"
+HYPg <- filter(CAF4, Intensity_MeanIntensity_CY5_RD1>= .1 & Intensity_MeanIntensity_GFP_RD1>= .15)
+HYPg$CellType <- "Hyp CAF"
+
+HYP_CAF <- rbind(HYPr, HYPg)
+#GFP positive once hypoxic CAFs
+OnHYP <- filter(CAF4, Intensity_MeanIntensity_CY5_RD1 >= .1 & Intensity_MeanIntensity_GFP_RD1 < .15)
+OnHYP$CellType <- "o-Hyp CAF"
+
+
+m4_comb <- rbind(Vim_CC,Vim_n_CC,NevHYP,HYPr,HYPg,OnHYP)
+
+im1 <- filter(m4_comb, ImageNumber=="4")
+
+#Make sure to have y values be negative to match actual images
+im1$Location_Center_Y <- -im1$Location_Center_Y
+
+val <- ggplot(im1, aes(x=Location_Center_X, y=Location_Center_Y, color=CellType))+
+  geom_point(size=2)+
+  scale_color_jama()+
+  theme_classic(base_size = 24)
+val
+
+```
+```{r}
+img <- "9"
+HYP_CAF3 <- filter(HYP_CAF, ImageNumber == img)
+NevHYP_CAF3 <- filter(NevHYP, ImageNumber == img)
+OnHYP_CAF3 <- filter(OnHYP, ImageNumber == img)
+
+CC3 <- filter(CC_comb, ImageNumber == img)
+Vim_CC3 <- filter(Vim_CC, ImageNumber == img)
+Vim_n_CC3 <- filter(Vim_n_CC, ImageNumber == img)
+
+#Getting coordinates for all cells
+
+Vimpos_CC <- as.matrix(Vim_CC3[,2:3])
+Vimneg_CC <- as.matrix(Vim_n_CC3[,2:3])
+total_CC <- as.matrix(CC3[,2:3])
+
+NevHYP_mat <- as.matrix(NevHYP_CAF3[,2:3])
+
+HYP_mat <- as.matrix(HYP_CAF3[,2:3])
+
+OnHYP_mat <- as.matrix(OnHYP_CAF3[,2:3])
+
+
+#Calc distances
+NevHYP_totalCC <- rdist(total_CC, NevHYP_mat)
+
+HYP_totalCC <- rdist(total_CC, HYP_mat)
+
+OnHYP_totalCC <- rdist(total_CC, OnHYP_mat)
+
+
+NevHYP_int <- rowSums(NevHYP_totalCC< 83.33)
+HYP_int <- rowSums(HYP_totalCC< 83.33)
+onHYP_int <- rowSums(OnHYP_totalCC< 83.33)
+
+CC_interact <- cbind(CC3,NevHYP_int,HYP_int,onHYP_int)
+
+Nev_Int <- filter(CC_interact, NevHYP_int >= 1)
+Nev_vim_f <- nrow(filter(Nev_Int, CellType =="Vim+ CC"))/nrow(Nev_Int)
+
+Hyp_Int <- filter(CC_interact, HYP_int >= 1)
+Hyp_vim_f <- nrow(filter(Hyp_Int, CellType =="Vim+ CC"))/nrow(Hyp_Int)
+
+onHyp_Int <- filter(CC_interact, onHYP_int >= 1)
+onHyp_vim_f <- nrow(filter(onHyp_Int, CellType =="Vim+ CC"))/nrow(onHyp_Int)
+
+None3 <- filter(CC_interact, NevHYP_int < 1)
+None <- filter(None3, HYP_int ==0 & onHYP_int == 0)
+None_vim_f <- nrow(filter(None, CellType =="Vim+ CC"))/nrow(None)
+
+#Combined between images 5 and 9 - these two had the least incorrect identification from what I could tell
+
+#Near Hyp, 264/3981 = 6.63% = 1.28 fold
+#Near n-Hyp, 110/2125 = 5.17% = 1 fold
+#Near o-Hyp, 9/160 = 5.62% = 1.087 fold
+#Near no CAF, .202
+```
