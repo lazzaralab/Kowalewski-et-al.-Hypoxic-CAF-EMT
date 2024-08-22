@@ -1,0 +1,826 @@
+---
+title: "CheckofHeatmapClusters"
+author: "Karl Kowalewski"
+date: "6/4/2021"
+output: html_document
+---
+
+##Loading packages
+```{r Load packages, message=F, warning=F}
+library(tidyverse)
+library(magrittr)
+library(ggsci)
+library(paletteer)
+library(cowplot)
+library(parallel)
+library(RColorBrewer)
+library(ggrepel)
+library(pheatmap)
+library(GEOquery)
+library(limma)
+library(umap)
+```
+```{r}
+### Clear R workspace:
+rm(list=ls())
+```
+```{r}
+### Check current working directory:
+cwd <- getwd()
+cwd
+```
+```{r}
+## Define 'not in' (ni) operator
+`%ni%` <- Negate(`%in%`)
+```
+
+```{r}
+theme_cust <- function(ticks, axis, box, lnsz, color){
+  if(missing(color)){color = "black"}
+  if(missing(ticks)){ticks <- TRUE}
+  if(missing(axis)){axis <- "y"}
+  if(missing(box)){box <- TRUE}
+  if(missing(lnsz)){lnsz <- 1}
+  if(ticks == FALSE & axis == "y" ){
+    theme_out <- theme(
+      axis.text.y = element_blank(), axis.ticks.y = element_blank(), # Make y axis ticks blank
+      axis.line.y = element_blank(),
+      axis.line.x = element_blank(),
+      panel.background = element_rect(size = lnsz, color = color, fill = "white"),
+      )
+  } else if(ticks == FALSE & axis != "y"){
+    theme_out <- theme(
+      axis.text.x = element_blank(), axis.ticks.x = element_blank(), # Make x axis ticks blank
+      axis.line.y = element_blank(),
+      axis.line.x = element_blank(),
+      panel.background = element_rect(size = lnsz, color = color, fill = "white"),
+      )
+  } else {
+     theme_out <- theme(
+       axis.line.y = element_blank(),
+       axis.line.x = element_blank(),
+       axis.ticks = element_line(color=color),
+       panel.background = element_rect(size = lnsz, color = color, fill = "white"),
+       ) 
+  }
+  
+  if(box != TRUE) {
+    theme_out <- theme_out + theme(panel.background = element_blank(),
+                                   axis.line.y = element_line(size = lnsz, color = color),
+                                   axis.line.x = element_line(size = lnsz, color = color)
+                                   )
+  } else {
+    theme_out <- theme_out
+  }
+}
+```
+
+```{r}
+## Ensembl ID-to-gene symbol annotations:
+fn.genes <- "genes.tsv"
+genes <- read_tsv(fn.genes, col_names = F)
+```
+```{r}
+colnames(genes) <- c("ensemblID","gene_symbol")
+
+
+## Load Entrez gene IDs that match ENSEMBL IDs:
+fn.entrez <- "entrezIDs.csv"
+file.exists(fn.entrez)
+```
+```{r}
+###Import clusters from Elyada paper
+fn.tsne <- "fibroblast_tsne2.csv"
+orig_tsne <- read.csv(fn.tsne)
+```
+
+```{r}
+if(file.exists(fn.entrez)){
+  entrezIDs <- read.csv(fn.entrez)
+} 
+
+## Use biomaRt to get ENTREZ gene IDs if the file doesn't exist:
+if(!exists("entrezIDs")){
+  library(biomaRt)
+  mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+  entrezIDs <- getBM(
+    filters="ensembl_gene_id",
+    attributes=c("ensembl_gene_id", "entrezgene_id"),
+    values=genes$ensemblID,
+    mart=mart)
+  entrezIDs$entrezgene_id[entrezIDs$ensembl_gene_id=="ENSG00000227953"] <- 149134 # ENTREZ ID for LOC149134 gene
+  write.csv(entrezIDs,"entrezIDs.csv",row.names = F)
+}
+```
+
+```{r}
+## First, decide whether we want data with low-variance genes filtered out (by the original authors) or the full set of expression data:
+which_data_to_use <- "filtered" # use "full" to indicate the full set of genes; otherwise, will use the pre-filtered data set for ductal cell
+
+## File names/paths:
+fn.fibroexp <- "fibroblast_expression.csv" # file with filtered ductal cell gene expression
+
+fn.exp <- "human_combined_expression.csv" # file with all gene expression for all cells
+
+fn.fibroexp.all <- "human_fibroblast_expression_all.csv"
+    
+
+if(which_data_to_use == "full"){
+  if(file.exists(fn.ductexp.all)){ # if expression of all genes in ductal cells has been extracted, load the file
+        all.exp <- read_csv(fn.fibroexp.all, col_names = T) %>%
+        # all.exp <- read_csv(fn.ductexp, col_names=T) %>% 
+          # dplyr::rename(geneID = X1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+
+      } else { # otherwise, get the data for all genes in ductal cells
+        ductal_names <- read_csv(fn.fibroexp, col_names=F, n_max=1)[,-1] %>%
+        t() # barcodes for ductal cells
+        all.exp <- read_csv(fn.exp, col_names=T)[,c("...1", ductal_names)] %>% # get expression data for all genes in ductal cells
+          dplyr::rename(geneID = ...1) %>% 
+          data.frame()
+        all.spls <- colnames(all.exp)[-1] %>% 
+          data.frame(ID=.)
+        write.csv(all.exp, file="human_fibro_expression_all.csv", row.names = F,
+                  col.names = T)
+      }
+  
+  } else {
+  all.exp <- read_csv(fn.fibroexp, col_names=T) %>% 
+    dplyr::rename(geneID = ...1) %>% 
+    data.frame()
+  all.spls <- colnames(all.exp)[-1] %>% 
+    data.frame(ID=.)
+}
+```
+```{r}
+## Get barcodes for adjacent normal sample cells:
+normal_cells <- all.exp %>% 
+  colnames() %>% 
+  str_detect("7|9") %>% 
+  colnames(all.exp)[.]
+
+## Get expression data for tumor cells only:
+exp <- all.exp %>%
+  dplyr::select(-all_of(normal_cells)) %>% # remove cells from adjacent normal tissue
+  dplyr::select(-contains("6")) # remove cells from sample hT143 (not a PDAC sample)
+rownames(exp) <- exp$geneID
+```
+```{r}
+## Expression data with Entrez gene IDs:
+exp.entrez <- exp %>% 
+  mutate(geneID = geneID %>% match(entrezIDs$ensembl_gene_id) %>% entrezIDs$entrezgene_id[.])
+
+## Expression data with gene symbols:
+exp.symbol <- exp %>% 
+  mutate(geneID = geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+## Sample annotation data:
+spls <- colnames(exp)[-1] %>% 
+  data.frame(ID=.)
+
+## Filter out zero-variance genes:
+zeroVar <- which((exp[,-1] %>% apply(MARGIN=1, FUN=var, na.rm=TRUE)) == 0)
+zeroVarGenes <- exp[zeroVar,] # genes with zero variance
+ exp.filt <- exp[-zeroVar, ] # expression data without zero-variance genes
+ exp <- exp[-zeroVar, ] # expression data without zero-variance genes
+```
+
+```{r}
+hif.sig <- c("IGFBP3", "EDN2", "PFKFB4", "FLT1", "TFR2", "BNIP3L", "TGFA",
+             "BNIP3","PGK1","EGLN1","LDHA","EGLN3","CP","TGFB3","PFKFB3",
+             "HK1","TFRC","EDN1","CDKN1A","CA9","ADM","HMOX1","SERPINE1",
+             "LOX","NDRG1","CA12","PDK1","VEGFA","ERO1L","RORA","P4HA1","MXI1",
+             "SLC2A1","STC2","MIF","DDIT4","ENO1","CXCR4","PLOD1","P4HA2","GAPDH","PGAM1","TMEM45A","PIM1") %>% 
+  match(genes$gene_symbol) %>% genes$ensemblID[.]
+
+## HIF signature gene expression:
+hif <- match(hif.sig, exp$geneID) %>% na.omit() %>% exp[.,] %>% data.frame()
+rownames(hif) <- hif$geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.]
+hif_scores <- hif[,-1] %>% colMeans() %>% data.frame(hif_score=., ID=colnames(hif)[-1])
+
+## Annotate the samples with their HIF scores:
+spls <- spls %>%
+  mutate(hif.score = hif_scores$hif_score)
+
+median(hif_scores$hif_score)
+```
+```{r}
+#want hypoxis score using hallmark_hypoxia from GSEA
+hall_hypoxia <- read.delim("hallmark_hypoxia.txt")
+hyp_genes <- hall_hypoxia$geneID
+
+hall_hyp_exp <- match(hyp_genes, exp.symbol$geneID) %>% na.omit() %>% exp.symbol[.,] %>% data.frame()
+
+HM_hyp <- hall_hyp_exp
+rownames(HM_hyp) <- hall_hyp_exp$geneID
+
+HM_hyp_scores <- HM_hyp[,-1] %>% colMeans() %>% data.frame(hif_score=., ID=colnames(hif)[-1])
+```
+
+```{r}
+pcemt.fn <- "CAF_sub_signature.txt"
+pcemt.sig <- read_tsv(pcemt.fn, col_names = c("gene","type"))
+pcemt.sig.m <- read_tsv(pcemt.fn, col_names = c("gene","type")) %>% subset(type %in% "M")
+
+pcemt <- pcemt.sig$gene %>%
+  match(genes$gene_symbol) %>% genes$ensemblID[.] %>% 
+  match(exp$geneID) %>% na.omit() %>% 
+  exp[.,]
+rownames(pcemt) <- pcemt$geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.]
+
+pcemt.t <- pcemt[,-1] %>% t() %>% 
+  data.frame() %>% 
+  mutate(ID = rownames(.))
+
+## Expression for the myofibroblastic genes:
+caf_m <- pcemt %>%
+  subset(rownames(.) %in% pcemt.sig.m$gene) %>%
+  .[,-1] %>%
+  t() 
+
+## Expression for the inflammatory genes:
+caf_i <- pcemt %>%
+  subset(rownames(.) %ni% pcemt.sig.m$gene) %>%
+  .[,-1] %>%
+  t() 
+
+## Mean expression scores for the epithelial and mesenchymal portions of the signature:
+caf_scores <- data.frame(CAF.M = caf_m %>% t() %>% colMeans(),
+                           CAF.I = caf_i %>% t() %>% colMeans(),
+                           ID = rownames(caf_m)
+                           )# %>% filter(pcEMT.M > 0 & pcEMT.E > 0)
+```
+
+
+```{r}
+## Mean expression correlations against pcEMT-M subsignature:
+library(ggstatsplot)
+
+caf_scores %>%
+  full_join(hif_scores, by="ID") %>% 
+  pivot_longer(-c(ID, CAF.I)) %>%
+  #pivot_longer(-c(ID, hif_score)) %>%
+  grouped_ggscatterstats(x=CAF.I, y=value,
+  #grouped_ggscatterstats(x=hif_score, y=value,
+                         grouping.var = name,
+                         type="p",
+                         title.prefix ="y",
+                         title.text="Mean expression scores")
+```
+```{r}
+caf_scores %>%
+  full_join(hif_scores, by="ID") %>% 
+  pivot_longer(-c(ID, CAF.I)) %>%
+  #pivot_longer(-c(ID, hif_score)) %>%
+  grouped_ggscatterstats(x=CAF.I, y=value,
+  #grouped_ggscatterstats(x=hif_score, y=value,
+                         grouping.var = name,
+                         type="p",
+                         title.prefix ="y",
+                         title.text="Mean expression scores")
+```
+
+```{r}
+library(umap); #library(M3C)
+```
+```{r}
+## Perform UMAP embedding:
+set.seed(123) # For reproducibility
+embedding <- umap::umap(exp[,-1] %>% t(), 
+                        n_neighbors = 30, min_dist = 0.01,
+                        n_comp = 2
+                        )
+
+## Compare to t-SNE result (may take a minute or two to run):
+if(!exists("tsne1")){
+  tsne1 <- M3C::tsne(exp[,-1], seed = 123, dotsize = 2) + labs(title="Fibroblast", x="tSNE1", y="tSNE2")
+}
+
+tsne1
+```
+
+```{r}
+## Plot UMAP embedding:
+embedding$layout %>%
+  data.frame() %>% mutate(ID = rownames(.)) %>% 
+  full_join(hif_scores, by="ID") %>% 
+  full_join(caf_scores, by="ID") %>% 
+  pivot_longer(-c(ID,X1,X2)) %>% 
+  ggplot(aes(X1,X2, label = ID, color = value)) + 
+    geom_point() + 
+    scale_color_viridis_c(option="C") +
+    facet_wrap(~name) +
+    theme_cowplot(18) + theme_cust(ticks=T,axis=T,box=T) +
+    labs(title="Fibroblasts", x = "UMAP1", y = "UMAP2")
+```
+```{r}
+pcemt_gene_annot <- pcemt.sig$type %>% 
+  data.frame(row.names=pcemt.sig$gene, type=.)
+
+## Entire signature:
+caf_phm <- pcemt[,-1] %>%
+  t()
+  # t() %>% scale()
+
+len_out <- 101
+breaks <- c(seq(min(caf_phm, na.rm=T), 0, length.out=ceiling(len_out/2) + 1), 
+              seq(max(caf_phm, na.rm=T)/len_out,
+                  max(caf_phm, na.rm=T),
+                  length.out=floor(len_out/2)))
+
+pheatmap(caf_phm,
+         # scale = "column",
+         clustering_distance_rows = "euclidean", clustering_distance_cols = "canberra",
+         clustering_method = "ward.D",
+         color = colorRampPalette(paletteer_c("viridis::plasma", n=len_out))(len_out),
+         # color = colorRampPalette(c("blue","grey80","red"))(len_out), breaks = breaks,
+         annotation_col = pcemt_gene_annot,
+         angle_col = 90, show_rownames = F, treeheight_row = 2, treeheight_col = 1,
+         main = "CAF subtype signature: Full signature",
+         # main = "pcEMT signature: Full signature (z-scored gene expression)",
+         # file = 
+         )
+```
+
+```{r}
+pcemt_gene_annot <- pcemt.sig$type %>% 
+  data.frame(row.names=pcemt.sig$gene, type=.)
+
+
+## Entire signature:
+caf_phm <- pcemt[,-1] %>%
+  t()
+  # t() %>% scale()
+
+len_out <- 101
+breaks <- c(seq(min(caf_phm, na.rm=T), 0, length.out=ceiling(len_out/2) + 1), 
+              seq(max(caf_phm, na.rm=T)/len_out,
+                  max(caf_phm, na.rm=T),
+                  length.out=floor(len_out/2)))
+
+pheatmap(caf_phm,
+         # scale = "column",
+         clustering_distance_rows = "euclidean", clustering_distance_cols = "canberra",
+         clustering_method = "ward.D2",
+         color = colorRampPalette(paletteer_c("viridis::plasma", n=len_out))(len_out),
+         # color = colorRampPalette(c("blue","grey80","red"))(len_out), breaks = breaks,
+         annotation_col = pcemt_gene_annot,
+         angle_col = 90, show_rownames = F, treeheight_row = 2, treeheight_col = 1,
+         main = "CAF subtype signature: Full signature",
+         # main = "pcEMT signature: Full signature (z-scored gene expression)",
+         # file = 
+         )
+```
+
+
+
+# Perform GSVA on myCAF population
+```{r}
+## ## Load packages:
+# BiocManager::install(c(msigdbr","GSVA","limma"))
+library(msigdbr)
+library(org.Hs.eg.db)
+### Define MSigDB gene set collection(s) to use --> retrieve with 'msigdbr' package:
+species = "Homo sapiens"
+
+## Retrieve Hallmark and canonical pathways collections in the database:
+hall = msigdbr(species = species, category = "H")
+cp = msigdbr(species = species, category = "C2", subcategory = "CP")
+cp.b = msigdbr(species = species, category = "C2", subcategory = "CP:BIOCARTA")
+cp.r = msigdbr(species = species, category = "C2", subcategory = "CP:REACTOME")
+cp.p = msigdbr(species = species, category = "C2", subcategory = "CP:PID")
+cp.k = msigdbr(species = species, category = "C2", subcategory = "CP:KEGG")
+cp.w = msigdbr(species = species, category = "C2", subcategory = "CP:WIKIPATHWAYS")
+gene_sets1 <- rbind(hall, cp, cp.b, cp.r, cp.p, cp.k, cp.w) %>% split(x = .$gene_symbol, f = .$gs_name)
+
+## Go collections:
+go.bp <- msigdbr(species = species, category = "C5", subcategory = "GO:BP")
+go.cc <- msigdbr(species = species, category = "C5", subcategory = "GO:CC")
+go.mf <- msigdbr(species = species, category = "C5", subcategory = "GO:MF")
+gene_sets2 <- rbind(go.bp, go.cc, go.mf) %>% split(x = .$gene_symbol, f = .$gs_name)
+
+## Transcription factor target collections:
+go.tft <- msigdbr(species = species, category = "C3", subcategory = "TFT:GTRD")
+go.tft_leg <- msigdbr(species = species, category = "C3", subcategory = "TFT:TFT_Legacy")
+gene_sets3 <- rbind(go.tft, go.tft_leg) %>% split(x = .$gene_symbol, f = .$gs_name)
+
+
+## Pan-cancer EMT sub-signatures, G13 signature, and HIF signature:
+caf_m_genes <- pcemt.sig %>% subset(type=="M") %>% dplyr::pull(gene) 
+caf_i_genes <- pcemt.sig %>% subset(type=="I") %>% dplyr::pull(gene)
+gene_sets4 <- list(
+  CAF_MYO_GENES = caf_m_genes,
+  CAF_INFLAM_GENES = caf_i_genes,
+  HIF_SIGNATURE = hif.sig %>% mapIds(org.Hs.eg.db, ., "SYMBOL", "ENSEMBL")
+  )
+
+gene_sets_all <- append(gene_sets1, gene_sets2) %>% append(gene_sets3) %>% append(gene_sets4)
+```
+
+```{r}
+library(GSVA)
+#### Expression data prep ####
+### Format data: Samples as columns, genes as rows
+data_for_gsva <- exp.symbol[,-1] %>% data.matrix()
+rownames(data_for_gsva) <- exp.symbol$geneID
+
+#### Calculate GSVA enrichment scores ####
+force_calculate_gsva <- F
+if(!file.exists("hs_fibro_gsva_results.Rdata") | isTRUE(force_calculate_gsva)){
+  gsva_res <- gsva(
+    data_for_gsva, 
+    gene_sets_all, verbose = F,
+    # gene_sets4, verbose = T
+    method = "zscore", 
+    kcdf = "Gaussian",
+    # abs.ranking = F,
+    # mx.diff = T,
+    min.sz = 3, # Minimum number of genes required to include a gene set
+    parallel.sz=detectCores()#-1
+    )
+  
+  ## Save GSVA results:
+  save(list = c("gsva_res"), file = "hs_fibro_gsva_results.Rdata")
+  
+} else if(file.exists("hs_fibro_gsva_results.Rdata") & !exists("gsva_res")){ 
+  ## Load GSVA results, if they haven't been loaded already:
+  load("hs_fibro_gsva_results.Rdata") 
+}
+## Build data frame versions of GSVA results:
+gsva_res.df <- gsva_res %>% data.frame(gene.set=rownames(.), .) # Convert to data frame
+gsva_res.df.t <- gsva_res %>% t() %>% data.frame(ID=rownames(.), .)
+rownames(gsva_res.df) <- gsva_res.df$gene.set
+```
+#Seurat Analysis
+```{r}
+#creat new seurat object
+library(Seurat)
+library(dplyr)
+library(Matrix)
+# Initialize the Seurat object with the raw (non-normalized data)
+# Note that this is slightly different than the older Seurat workflow, where log-normalized values were passed in directly.
+# You can continue to pass in log-normalized values, just set do.logNormalize=F in the next step.
+fibrodata1 <- exp.symbol[-c(10311,10312,10313,10314,10315),]
+
+
+fibrodata <- fibrodata1[,-1]
+rownames(fibrodata)<- fibrodata1$geneID
+
+seuratdata <- fibrodata #%>% data.matrix()
+
+seuratdata2 <- seuratdata
+### seurat<-CreateSeuratObject(raw.data = counts, ? = 3, ? = 350, project = "10X_NSCLC")
+seurat<-CreateSeuratObject(seuratdata2, min.cells = 0, min.features = 0, project = "scRNA_seq_fibros")
+
+#View original data
+seurat@assays$RNA[1:10,1:10]
+```
+```{r}
+# Can look at metadata features by Violin plot,
+# Useful for setting thresholds on data
+
+VlnPlot(object = seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+```
+```{r}
+
+seurat <- FindVariableFeatures(seurat, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(seurat), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(seurat)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1
+plot2
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+#library(CountClust)
+
+#scale the data
+seurat@meta.data$barcode <- row.names(seurat@meta.data)
+
+VlnPlot(object = seurat, features = c("nCount_RNA", "nFeature_RNA"))
+
+
+seurat <- NormalizeData(object = seurat, normalization.method = "LogNormalize", scale.factor = 10000)
+
+seurat <- FindVariableFeatures(object = seurat, 
+                          mean.function = ExpMean, 
+                          dispersion.function = LogVMR, 
+                          do.plot = FALSE)
+
+
+all.genes <- rownames(seurat)
+
+seurat <- ScaleData(seurat, features = all.genes)
+
+seurat@meta.data$hif_score <- hif_scores[,1]
+seurat@meta.data$HM_hyp_score <- HM_hyp_scores[,1]
+
+orig_clusters <- match(orig_tsne$Cell, hif_scores$ID) %>% na.omit() %>% orig_tsne[.,] %>% data.frame()
+seurat@meta.data$orig_clusters <- orig_clusters[,5]
+
+HM_hypoxia_scores_boxplot <- cbind(orig_clusters[,-c(1,2,3,4)], HM_hyp_scores[,1])
+HM_hyp_box_2 <- cbind(HM_hypoxia_scores_boxplot, hif_scores[,1])
+
+colnames(HM_hypoxia_scores_boxplot) <- c("Cluster", "HM_hypoxia_score")
+
+colnames(HM_hyp_box_2) <- c("Cluster", "HM_hypoxia_score","hif_score")
+
+```
+
+```{r}
+#Perform PCA
+seurat <- RunPCA(seurat, features = VariableFeatures(object = seurat))
+# Examine and visualize PCA results a few different ways
+print(seurat[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(seurat, dims = 1:2, reduction = "pca")
+DimPlot(seurat, reduction = "pca")
+
+DimHeatmap(seurat, dims = 1:15, cells = 500, balanced = TRUE)
+
+```
+```{r}
+seurat <- FindNeighbors(seurat, dims = 1:10)
+seurat <- FindClusters(seurat, resolution = .05)
+```
+
+```{r}
+seurat <-RunTSNE(seurat, reduction.use = "pca", dims.use = 1:10, perplexity=30)
+
+# note that you can set do.label=T to help label individual clusters
+TSNEPlot(object = seurat)
+
+```
+```{r}
+new.cluster.ids <- c("myCAF","iCAF")
+names(new.cluster.ids) <- levels(seurat)
+seurat <- RenameIdents(seurat, new.cluster.ids)
+
+TSNEPlot(seurat, reduction = "pca", label = TRUE) + NoLegend() + 
+  theme(text=element_text(size=20))
+seurat@meta.data$Cluster <- seurat@active.ident
+
+FeaturePlot(object = seurat, features = "hif_score")
+
+FeaturePlot(object = seurat, features = "HM_hyp_score")
+
+FeaturePlot(object = seurat, features = "orig_clusters")
+```
+```{r}
+DefaultAssay(seurat) <- "RNA"
+
+VlnPlot(seurat, c("MYC"))
+
+df <- read.delim("C:/Users/karlm/OneDrive - University of Virginia/Documents/R/CellphoneDB/means.txt")
+```
+
+#Making function for plotting violin plots
+```{r}
+library("ggpubr")
+library("dplyr")
+
+vp_case1 <- function(gene_signature, file_name, test_sign){
+  plot_case1 <- function(signature, y_max = NULL){
+    VlnPlot(seurat, features = signature,
+            pt.size = 0.1, 
+            group.by = "Cluster", 
+            y.max = y_max # add the y-axis maximum value - otherwise p-value hidden
+    ) + stat_compare_means(comparisons = test_sign, label = "p.signif")
+  }
+  plot_list <- list()
+  y_max_list <- list()
+  for (gene in gene_signature) {
+    plot_list[[gene]] <- plot_case1(gene)
+    y_max_list[[gene]] <- max(plot_list[[gene]]$data[[gene]]) # get the max no. for each gene
+    plot_list[[gene]] <- plot_case1(gene, y_max = (y_max_list[[gene]] + 1) )
+  }
+  cowplot::plot_grid(plotlist = plot_list)
+  file_name <- paste0(file_name, "_r.png")
+  ggsave(file_name, width = 14, height = 8)
+}
+
+gene_sig1 <- c("MIF","IGF2","IL6","CTGF","OGN","PDGFRL","FGF7","C3","FGF7","CXCL12")
+gene_sig2 <- c("IGF1","NAMPT","CXCL14","CCL2","CXCL2","MDK","GRN","CLEC11A","VEGFA")
+
+gene_sig3 <- c("INHBA","S100A6","PDGFRB","CMTM3","PLAU","FAM3C","MANF","IL32","LTBP4")
+
+comparisons <- list(c("myCAF", "iCAF"))
+vp_case1(gene_signature = gene_sig1, file_name = "gene_sig1_iCAF_myCAF_comp", test_sign = comparisons)
+vp_case1(gene_signature = gene_sig2, file_name = "gene_sig2_iCAF_myCAF_comp", test_sign = comparisons)
+vp_case1(gene_signature = gene_sig3, file_name = "gene_sig3_iCAF_myCAF_comp", test_sign = comparisons)
+
+```
+
+
+#Divide up all CAFs into Hypoxia high and hypoxia low
+```{r}
+gsva_hif <- gsva_res.df.t[,c("ID","HIF_SIGNATURE","HALLMARK_HYPOXIA")]
+gsva_hif_up <- cbind(gsva_hif, seurat@active.ident)
+
+med_hif_gsva <- median(gsva_hif$HIF_SIGNATURE)
+med_HM_gsva <- median(gsva_hif$HALLMARK_HYPOXIA)
+```
+
+```{r}
+#library(ggprism)
+o <- ggplot(gsva_hif_up, aes(x=`seurat@active.ident`, y=`HALLMARK_HYPOXIA`, fill=`seurat@active.ident`)) +
+  geom_jitter(width = .2, size = .02, stroke = 1.5,color='darkgrey')+
+  geom_violin(width=0.9, trim = FALSE, size=1.5)+ #aes(fill=`siRNA`)) + 
+  scale_color_manual(values=c("black","black"))+
+  scale_fill_manual(values=c("#f08080ff","#1e90ffff"))+
+  #scale_fill_manual(values=c("#DACEB8","#96ABD1"))+
+  geom_boxplot(fill = "white", width = 0.07) + 
+  ylab("Hallmark Hypoxia GSVA Score") +
+  xlab("") +
+  #geom_violin() +
+  #geom_boxplot() +
+  #geom_jitter() +
+  #scale_x_discrete(limits=c("Control","NSD2"))+
+  ylim(-10,15)+
+  #guides(y = "prism_offset_minor") + 
+  theme_classic(base_size = 24) + 
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                  size = 20, hjust = 1))+
+  theme(axis.text.y = element_text(size = 20, hjust = .5))+
+  geom_signif(comparisons=list(c("myCAF", "iCAF")), annotations=c("****"),
+        y_position = c(13.5), tip_length = c(.3,.1), vjust=0.4, size=1.25, textsize=10, color = "black")
+  #add_pvalue(p_val, label = "{p.adj}", tip.length = 0, label.size = 10)
+o
+```
+
+```{r}
+#need to first filter the data for the high and low hif cells - need to set cutoffs
+
+### distribution intervals of HIF_scores
+median_HM <- median(gsva_hif$HALLMARK_HYPOXIA)
+
+HM_enr_scores <-gsva_hif[,c(1,3)]
+
+lowerHM1 <- data.frame(HM_enr_scores %>% filter(HALLMARK_HYPOXIA < median_HM))
+upperHM1 <- data.frame(HM_enr_scores %>% filter(HALLMARK_HYPOXIA > median_HM))
+
+med_lowHM1 <- median(lowerHM1$HALLMARK_HYPOXIA)
+med_uppHM1 <- median(upperHM1$HALLMARK_HYPOXIA)
+
+caf_HM_H <- data.frame(HM_enr_scores %>% filter(HALLMARK_HYPOXIA > med_uppHM1))
+#need to bind HIGH HIF signature as variable in data.frame
+caf_HM_H['HM'] = '2'
+
+
+caf_HM_L <- data.frame(HM_enr_scores %>% filter(HALLMARK_HYPOXIA < med_lowHM1))
+#need to bind LOW HIF signature as variable in data.frame
+caf_HM_L['HM'] = '1'
+
+#CAF_hif_filt <- data.frame(hif_scores %>% filter(hif_score > .522 | hif_score < .359))
+CAF_HM_all <- rbind(caf_HM_H, caf_HM_L)
+```
+
+```{r}
+exp.t <- exp[,-1] %>% t() %>% 
+  data.frame() #%>% 
+  #mutate(ID = rownames(.))
+cells<- rownames(exp.t)
+exp_t_use <- cbind(cells, exp.t)
+
+COI <- CAF_HM_all$ID
+
+HM_filt_exp <- exp_t_use[COI,-1]
+
+HM_filt_exp.t <- HM_filt_exp %>% t()
+
+geneID <- rownames(HM_filt_exp.t)
+
+HM_filt_exp_ensmbl <- data.frame(cbind(geneID, HM_filt_exp.t))
+
+HM_filt_exp.symbol <- HM_filt_exp_ensmbl %>% 
+  mutate( geneID =  geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+## For HM hypoxia scores
+
+COI <- CAF_HM_all$ID
+
+HM_filt_exp <- exp_t_use[COI,-1]
+
+HM_filt_exp.t <- HM_filt_exp %>% t()
+
+geneID <- rownames(HM_filt_exp.t)
+
+HM_filt_exp_ensmbl <- data.frame(cbind(geneID, HM_filt_exp.t))
+
+HM_filt_exp.symbol <- HM_filt_exp_ensmbl %>% 
+  mutate( geneID =  geneID %>% match(genes$ensemblID) %>% genes$gene_symbol[.])
+
+HM_filt <- HM_filt_exp.symbol[-c(10311,10312,10313,10314,10315),-1]
+rownames(HM_filt) <- HM_filt_exp.symbol[-c(10311,10312,10313,10314,10315),]$geneID
+```
+#Getting annotations ready
+```{r}
+annot_all <- CAF_HM_all$ID %>%
+  match(orig_tsne$Cell)  %>% na.omit() %>%
+  orig_tsne[.,]
+
+annot_all2 <- cbind(annot_all[,c(1,5)],CAF_HM_all$HM)
+
+names(annot_all2)[3] <- "Hypoxia"
+#iCAF=1, myCAF=2, HM low = 1, HM high = 2
+cells<- annot_all$Cell
+```
+
+```{r}
+CellType <- as.data.frame(seurat@active.ident)
+seurat.id <- as.data.frame(seurat@meta.data$barcode)
+
+annot_all2 <- cbind(seurat.id, CellType)
+
+```
+
+#Cytokine growth factors Heatmap
+
+```{r}
+fn.cyto_gf <- "cytokines_growthfactors.txt"
+cyto_gf <- read.delim(fn.cyto_gf)
+ck_list <- cyto_gf$GeneID
+
+GOI_HM_cyto_gf <- HM_filt_exp.symbol[cyto_gf$GeneID,] %>%
+  na.omit()
+
+all_cyto_gf <- fibrodata[cyto_gf$GeneID,] %>%
+  na.omit()
+
+all_cyto_gf[is.na(all_cyto_gf)] <- 0
+
+GOI_HM_cyto_gf.t <- as.data.frame(t(GOI_HM_cyto_gf))
+GOI_all_cyto_gf.t <- as.data.frame(t(all_cyto_gf))
+
+
+cyto2 <- as.data.frame(sapply(GOI_HM_cyto_gf.t, as.numeric)) #<- sapply is here
+
+cyto.all <- as.data.frame(sapply(GOI_all_cyto_gf.t, as.numeric)) #<- sapply is here
+
+#cyto_gf_HM <- cbind(cyto2, GOI_HM_final$HIF)
+
+#names(cyto_gf_HM)[names(cyto_gf_HM) == 'GOI_HM_final$HIF'] <- 'Hypoxia'
+
+#rownames(cyto_gf_HM) <- rownames(GOI_HM_cyto_gf.t)
+
+rownames(cyto.all) <- rownames(GOI_all_cyto_gf.t)
+rank.ligands <-as.data.frame(colSums(cyto.all[,-1]))
+sub.ligands <- filter(rank.ligands, `colSums(cyto.all[, -1])` > 0)
+ligs.keep <- rownames(sub.ligands)
+cyto.all <- cyto.all[,ligs.keep]
+hm_cyto_gf <- cyto2
+cyto_all_gf <- cyto.all
+
+hm_cyto_matrix <- as.matrix(hm_cyto_gf)
+cyto_all_gf_matrix <- as.matrix(cyto_all_gf)
+
+len_out <- 101
+
+sub_annot <- as.data.frame(annot_all2$`seurat@active.ident`)
+```
+
+```{r}
+annot.all <- as.data.frame(annot_all2)
+rownames(annot.all) <- annot.all$`seurat@meta.data$barcode`
+annot.all.final <- as.data.frame(annot.all[,-1])
+rownames(annot.all.final) <- annot.all$`seurat@meta.data$barcode`
+colnames(annot.all.final) <- "CAF Type"
+
+newCols <- colorRampPalette(grDevices::rainbow(length(unique(annot.all.final$`CAF Type`))))
+mycolors <- c("#00A1D5","#DF8F44")
+names(mycolors) <- unique(annot.all.final$`CAF Type`)
+mycolors <- list(`CAF Type` = mycolors)
+
+
+pheatmap(cyto_all_gf_matrix,
+         # scale = "column",
+         clustering_distance_rows = "euclidean", clustering_distance_cols = "canberra",
+         clustering_method  = "ward.D2",
+         cluster_rows = F,
+         #kmeans_k = 2,
+         #color = colorRampPalette(paletteer_c("viridis::plasma", n=len_out))(len_out),
+         color = colorRampPalette(c("darkblue","dodgerblue4", "dodgerblue2","lightskyblue2","lightpink", "#FF6666","firebrick1" ,"firebrick2","firebrick2","firebrick3","firebrick3","firebrick", "darkred","firebrick4","firebrick4"))(len_out),
+         #annotation_col = pcemt_gene_annot,
+         annotation_row = annot.all.final,
+         annotation_colors = mycolors,
+         angle_col = 90, show_rownames = F, treeheight_row = 2, treeheight_col = 1,
+         #main = "CAF subtype: Growth factors",
+         fontsize_row = 8,
+         fontsize_col = 8
+         # main = "pcEMT signature: Full signature (z-scored gene expression)",
+         # file = 
+         )
+```
+
+
